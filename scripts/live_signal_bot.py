@@ -50,8 +50,11 @@ DEPLOY_PARAMS = {
 }
 WARMUP_DAYS = 60
 SYMBOL = "XAUUSD"
-SOURCE = "PAXG"
 STRATEGY = "ob_fvg_trend"
+# Data source: 'mt5' (real Exness prices on the VPS) or 'paxg' (proxy, cloud/dev).
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "paxg").lower()
+MT5_SYMBOL = os.environ.get("MT5_SYMBOL", "XAUUSDm")
+SOURCE = "MT5" if DATA_SOURCE == "mt5" else "PAXG"
 
 
 # ---------- config ----------
@@ -113,6 +116,9 @@ def get_chat_id(token: str) -> None:
 
 # ---------- data ----------
 def fresh_ohlcv(tf: str) -> pd.DataFrame:
+    if DATA_SOURCE == "mt5":
+        from src.data import mt5_feed                  # lazy, Windows-only
+        return mt5_feed.bars(MT5_SYMBOL, tf, n=3000)
     start = str((pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=WARMUP_DAYS)).date())
     if tf == "H1":
         return paxg_loader.download(interval="1h", start=start, overwrite=True)
@@ -124,6 +130,15 @@ def fresh_ohlcv(tf: str) -> pd.DataFrame:
                       "close": "last", "volume": "sum"})
                 .dropna().reset_index())
     raise ValueError(f"unsupported tf {tf}")
+
+
+def fresh_m5() -> pd.DataFrame:
+    """5-minute bars for outcome resolution, from the active source."""
+    if DATA_SOURCE == "mt5":
+        from src.data import mt5_feed
+        return mt5_feed.bars(MT5_SYMBOL, "M5", n=5000)
+    start = str((pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=WARMUP_DAYS)).date())
+    return paxg_loader.download(interval="5m", start=start, overwrite=True)
 
 
 # ---------- signal detection ----------
@@ -143,7 +158,7 @@ def check_tf(tf: str, cfg: dict) -> dict | None:
     if signal_db.exists(tf, bar_ts):
         print(f"  {tf}: already recorded {bar_ts}")
         return None
-    off = cfg["price_offset"]
+    off = 0.0 if DATA_SOURCE == "mt5" else cfg["price_offset"]
     raw = float(df.at[i, "close"])
     entry, sl, tp = raw + off, float(sig.at[i, "sl"]) + off, float(sig.at[i, "tp"]) + off
     return {"tf": tf, "ts": bar_ts, "action": action, "raw": raw, "offset": off,
@@ -156,7 +171,10 @@ def format_msg(s: dict, risk_pct: float) -> str:
     arrow = "🟢 LONG (mua)" if long else "🔴 SHORT (bán)"
     rr = s["reward_dist"] / s["risk_dist"] if s["risk_dist"] else 0
     ts = s["ts"].replace("+00:00", " UTC")
-    src = "XAU (đã +offset)" if s["offset"] else "PAXG (proxy vàng)"
+    if SOURCE == "MT5":
+        src = "Exness MT5 (giá thật)"
+    else:
+        src = "XAU (PAXG +offset)" if s["offset"] else "PAXG (proxy vàng)"
     return (
         f"🟡 <b>XAU SIGNAL</b> — ob_fvg_trend\n"
         f"📊 Khung <b>{s['tf']}</b> | {arrow}\n"
@@ -186,9 +204,8 @@ def resolve_open(cfg: dict) -> int:
     rows = signal_db.open_signals()
     if not rows:
         return 0
-    start = min(pd.Timestamp(r["signal_bar_ts"]) for r in rows) - pd.Timedelta(days=1)
-    m5 = paxg_loader.download(interval="5m", start=str(start.date()), overwrite=True)
-    off = cfg["price_offset"]
+    m5 = fresh_m5()
+    off = 0.0 if DATA_SOURCE == "mt5" else cfg["price_offset"]
     m5 = m5.assign(high=m5["high"] + off, low=m5["low"] + off)
     closed = 0
     for r in rows:
