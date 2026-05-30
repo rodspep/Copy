@@ -2,9 +2,10 @@
 configs/telegram.json
 
 # ---- data / db / logs (runtime, large, or on Railway volume) ----
-data/
-logs/
-results/
+# anchored to repo root so src/data/ (the loaders package) is NOT excluded
+/data/
+/logs/
+/results/
 *.db
 *.sqlite
 *.parquet
