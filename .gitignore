@@ -1,5 +1,6 @@
 # ---- secrets (NEVER commit) ----
 configs/telegram.json
+configs/mt5.json
 
 # ---- data / db / logs (runtime, large, or on Railway volume) ----
 # anchored to repo root so src/data/ (the loaders package) is NOT excluded

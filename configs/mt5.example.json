@@ -1,0 +1,16 @@
+{
+  "mt5": {
+    "account": 12345678,
+    "password": "YOUR_MT5_PASSWORD",
+    "server": "Exness-MT5Real",
+    "symbol": "XAUUSDm"
+  },
+  "railway": {
+    "token": "YOUR_RAILWAY_PROJECT_TOKEN",
+    "project_id": "c50e6240-1315-4959-af62-21d213a15205",
+    "environment_id": "b87f3220-1d9f-4dc7-be1d-d2cc424c2efa",
+    "service_id": "8c280fc3-1c31-4dea-be33-971b57e46bfa"
+  },
+  "push_threshold": 0.5,
+  "_note": "account/password/server: Exness Personal Area -> trading account -> MT5 login. symbol: Exness gold is often XAUUSDm (check Market Watch). push_threshold: only update Railway when offset drifts >= this many USD (avoids redeploy churn)."
+}
