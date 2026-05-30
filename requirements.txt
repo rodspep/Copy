@@ -1,0 +1,6 @@
+# Minimal runtime deps for the live signal bot (Railway).
+# Full research/backtest/optimize stack is in requirements-dev.txt.
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14
+requests>=2.31

@@ -1,0 +1,8 @@
+{
+  "bot_token": "PUT_YOUR_BOT_TOKEN_HERE",
+  "chat_id": "PUT_YOUR_CHAT_ID_HERE",
+  "timeframes": ["H1", "M30"],
+  "risk_pct": 1.0,
+  "price_offset": 0.0,
+  "_note": "Local dev only. On Railway use ENV vars (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ...). price_offset = Exness_XAU_price - PAXG_price."
+}

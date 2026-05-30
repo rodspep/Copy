@@ -1,0 +1,24 @@
+# ---- secrets (NEVER commit) ----
+configs/telegram.json
+
+# ---- data / db / logs (runtime, large, or on Railway volume) ----
+data/
+logs/
+results/
+*.db
+*.sqlite
+*.parquet
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# ---- os / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
