@@ -429,6 +429,11 @@ def main() -> int:
     interval = args.loop or cfg["poll_seconds"]
     if interval > 0:
         print(f"polling every {interval}s — Ctrl+C to stop")
+        try:                              # record PID so restart_bot.bat can stop us
+            Path("logs").mkdir(exist_ok=True)
+            Path("logs/xau_bot.pid").write_text(str(os.getpid()))
+        except Exception as e:
+            print(f"  pid file warn: {e}")
         # Separate thread handles /check via long-polling → replies in ~1s,
         # independent of the 60s market loop.
         threading.Thread(target=_command_loop, args=(cfg,), daemon=True).start()
