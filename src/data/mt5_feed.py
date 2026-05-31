@@ -11,6 +11,7 @@ used consistently for signal timestamps, dedup, and outcome resolution.
 from __future__ import annotations
 
 import os
+import time
 
 import pandas as pd
 
@@ -22,22 +23,46 @@ def _mt5():
     return mt5
 
 
-def init(account: int | None = None, password: str = "", server: str = "") -> None:
-    """Initialize + (optionally) log in to the terminal. Idempotent."""
+def _connected(mt5) -> bool:
+    ti = mt5.terminal_info()
+    return ti is not None and bool(getattr(ti, "connected", False))
+
+
+def init(account: int | None = None, password: str = "", server: str = "",
+         retries: int = 4, backoff: float = 5.0) -> None:
+    """Attach to (or launch) the MT5 terminal and verify it's connected.
+
+    Robust to the terminal still starting up after a reboot (the "-10005 IPC
+    timeout" we hit): retries with backoff, optionally uses MT5_PATH to target a
+    specific terminal, and only marks ready once terminal_info().connected.
+    Idempotent. All credentials are stripped of stray whitespace.
+    """
     global _INITED
     if _INITED:
         return
     mt5 = _mt5()
-    if not mt5.initialize():
-        raise RuntimeError(f"mt5.initialize() failed: {mt5.last_error()}")
-    account = account or (int(os.environ["MT5_ACCOUNT"])
-                          if os.environ.get("MT5_ACCOUNT") else None)
-    if account:
-        password = password or os.environ.get("MT5_PASSWORD", "")
-        server = server or os.environ.get("MT5_SERVER", "")
-        if not mt5.login(int(account), password=password, server=server):
-            raise RuntimeError(f"mt5.login failed: {mt5.last_error()}")
-    _INITED = True
+    path = os.environ.get("MT5_PATH", "").strip()
+    acct_env = os.environ.get("MT5_ACCOUNT", "").strip()
+    account = account or (int(acct_env) if acct_env else None)
+    password = (password or os.environ.get("MT5_PASSWORD", "")).strip()
+    server = (server or os.environ.get("MT5_SERVER", "")).strip()
+
+    last = ""
+    for attempt in range(max(1, retries)):
+        ok = mt5.initialize(path) if path else mt5.initialize()
+        if not ok:
+            last = f"initialize failed: {mt5.last_error()}"
+        elif account and not mt5.login(int(account), password=password, server=server):
+            last = f"login failed: {mt5.last_error()}"
+            mt5.shutdown()
+        elif not _connected(mt5):
+            last = "terminal not connected yet"
+            mt5.shutdown()
+        else:
+            _INITED = True
+            return
+        time.sleep(backoff)
+    raise RuntimeError(f"mt5 init failed after {retries} tries: {last}")
 
 
 def _tf_const(tf: str):
@@ -51,8 +76,12 @@ def _tf_const(tf: str):
 
 def bars(symbol: str, tf: str, n: int = 3000) -> pd.DataFrame:
     """Return the last `n` bars as [timestamp, open, high, low, close, volume]."""
+    global _INITED
     mt5 = _mt5()
     init()
+    if not _connected(mt5):           # runtime disconnect → force a clean re-init
+        _INITED = False
+        init()
     if not mt5.symbol_select(symbol, True):
         raise RuntimeError(f"symbol_select({symbol}) failed: {mt5.last_error()}")
     rates = mt5.copy_rates_from_pos(symbol, _tf_const(tf), 0, n)

@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 def db_path() -> str:
-    return os.environ.get("DB_PATH", "data/signals.db")
+    return os.environ.get("DB_PATH", "data/signals.db").strip() or "data/signals.db"
 
 
 def _conn(path: str | None = None) -> sqlite3.Connection:
@@ -50,19 +50,30 @@ def init_db(path: str | None = None) -> None:
             closed_at     TEXT,
             exit_price    REAL,
             result_r      REAL,
-            UNIQUE(timeframe, signal_bar_ts)
+            UNIQUE(source, symbol, strategy, timeframe, signal_bar_ts)
         )"""
     )
     c.commit()
     c.close()
 
 
-def exists(timeframe: str, bar_ts: str, path: str | None = None) -> bool:
+def exists(timeframe: str, bar_ts: str, source: str = "", symbol: str = "",
+           strategy: str = "", path: str | None = None) -> bool:
+    """Dedup check. Scoped by (source, symbol, strategy, timeframe, bar_ts) so a
+    signal from a different source/symbol/strategy on the same bar is not
+    suppressed. Empty source/symbol/strategy → legacy (timeframe, bar_ts) check."""
     c = _conn(path)
-    r = c.execute(
-        "SELECT 1 FROM signals WHERE timeframe=? AND signal_bar_ts=?",
-        (timeframe, bar_ts),
-    ).fetchone()
+    if source or symbol or strategy:
+        r = c.execute(
+            "SELECT 1 FROM signals WHERE source=? AND symbol=? AND strategy=? "
+            "AND timeframe=? AND signal_bar_ts=?",
+            (source, symbol, strategy, timeframe, bar_ts),
+        ).fetchone()
+    else:
+        r = c.execute(
+            "SELECT 1 FROM signals WHERE timeframe=? AND signal_bar_ts=?",
+            (timeframe, bar_ts),
+        ).fetchone()
     c.close()
     return r is not None
 

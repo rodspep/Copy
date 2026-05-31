@@ -54,6 +54,8 @@ STRATEGY = "ob_fvg_trend"
 # Data source: 'mt5' (real Exness prices on the VPS) or 'paxg' (proxy, cloud/dev).
 DATA_SOURCE = os.environ.get("DATA_SOURCE", "paxg").strip().lower()
 MT5_SYMBOL = os.environ.get("MT5_SYMBOL", "XAUUSDm").strip()
+if DATA_SOURCE not in ("mt5", "paxg"):       # fail loud, never silently fall back
+    raise SystemExit(f"Invalid DATA_SOURCE={DATA_SOURCE!r} — must be 'mt5' or 'paxg'.")
 SOURCE = "MT5" if DATA_SOURCE == "mt5" else "PAXG"
 
 
@@ -67,14 +69,14 @@ def load_cfg() -> dict:
             cfg = {}
     # Environment variables override the file (Railway / production).
     env = os.environ
-    token = env.get("TELEGRAM_BOT_TOKEN", cfg.get("bot_token"))
-    chat = env.get("TELEGRAM_CHAT_ID", cfg.get("chat_id"))
-    if not token or not chat or "PUT_YOUR" in str(token):
+    token = str(env.get("TELEGRAM_BOT_TOKEN", cfg.get("bot_token") or "")).strip()
+    chat = str(env.get("TELEGRAM_CHAT_ID", cfg.get("chat_id") or "")).strip()
+    if not token or not chat or "PUT_YOUR" in token:
         raise SystemExit("Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID "
                          "(env vars or configs/telegram.json).")
     tfs = env.get("TIMEFRAMES")
-    timeframes = ([t.strip() for t in tfs.split(",")] if tfs
-                  else cfg.get("timeframes", ["H1", "M30"]))
+    raw_tfs = (tfs.split(",") if tfs else cfg.get("timeframes", ["H1", "M30"]))
+    timeframes = [t.strip().upper() for t in raw_tfs if t and t.strip()]
     return {
         "bot_token": str(token),
         "chat_id": str(chat),
@@ -155,7 +157,7 @@ def check_tf(tf: str, cfg: dict) -> dict | None:
     if action not in ("enter_long", "enter_short"):
         print(f"  {tf}: no new signal (last closed {bar_ts})")
         return None
-    if signal_db.exists(tf, bar_ts):
+    if signal_db.exists(tf, bar_ts, SOURCE, SYMBOL, STRATEGY):
         print(f"  {tf}: already recorded {bar_ts}")
         return None
     off = 0.0 if DATA_SOURCE == "mt5" else cfg["price_offset"]
@@ -198,9 +200,18 @@ def close_msg(row, result_r: float, status: str) -> str:
             f"Kết quả: <b>{result_r:+.2f}R</b>")
 
 
+# Bar duration per timeframe (minutes) — used to find the entry candle's open.
+TF_MINUTES = {"M5": 5, "M15": 15, "M30": 30, "H1": 60, "H4": 240}
+
+
 # ---------- outcome resolution ----------
 def resolve_open(cfg: dict) -> int:
-    """Check open signals against 5m price; close those that hit TP or SL."""
+    """Resolve open signals against 5m price; close those that hit TP or SL.
+
+    Parity: a signal printed at bar i's CLOSE is entered at bar i+1's OPEN. So
+    outcomes are evaluated only from the entry bar onward (signal_bar_ts + one
+    timeframe), never from inside the signal candle itself.
+    """
     rows = signal_db.open_signals()
     if not rows:
         return 0
@@ -209,8 +220,9 @@ def resolve_open(cfg: dict) -> int:
     m5 = m5.assign(high=m5["high"] + off, low=m5["low"] + off)
     closed = 0
     for r in rows:
-        # Evaluate bars strictly AFTER the signal bar (entry = next-bar fill).
-        seg = m5[m5["timestamp"] > pd.Timestamp(r["signal_bar_ts"])]
+        tf_min = TF_MINUTES.get(r["timeframe"], 60)
+        entry_ts = pd.Timestamp(r["signal_bar_ts"]) + pd.Timedelta(minutes=tf_min)
+        seg = m5[m5["timestamp"] >= entry_ts]      # from entry bar open onward
         if seg.empty:
             continue
         long = r["direction"] == "long"
@@ -224,7 +236,6 @@ def resolve_open(cfg: dict) -> int:
             else:
                 if hi >= sl:   hit = ("loss", sl); break
                 if lo <= tp:   hit = ("win", tp); break
-            ts_hit = b["timestamp"]
         if hit:
             status, px = hit
             result_r = r["rr"] if status == "win" else -1.0
