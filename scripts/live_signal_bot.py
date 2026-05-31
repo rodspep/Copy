@@ -116,6 +116,50 @@ def get_chat_id(token: str) -> None:
         print("  No chats. Message your bot (or add it to the channel) first.")
 
 
+# ---------- on-demand /check command ----------
+def _tg_init_offset(token: str) -> int:
+    """Return last update_id+1 so we ignore messages sent before the bot started."""
+    try:
+        r = requests.get(TG_API.format(token=token, method="getUpdates"),
+                         params={"timeout": 0}, timeout=20).json()
+        ups = r.get("result", [])
+        return ups[-1]["update_id"] + 1 if ups else 0
+    except Exception:
+        return 0
+
+
+def _check_reply(cfg: dict) -> str:
+    """Live health probe: read the latest bar to confirm the bot truly works."""
+    try:
+        df = fresh_ohlcv("H1")
+        last = str(df["timestamp"].iloc[-1]).replace("+00:00", " UTC")
+        price = float(df["close"].iloc[-1])
+        d = signal_db.summary()
+        return (f"🤖 <b>XAU bot ĐANG CHẠY</b> (nguồn {SOURCE})\n"
+                f"Đọc dữ liệu: ✅ OK\n"
+                f"Nến H1 cuối: {last} · giá {price:.2f}\n"
+                f"DB: {d['total']} signal · open {d['open_n']} · "
+                f"win {d['wins']} / loss {d['losses']} · expR {d['exp_r']:+.2f}")
+    except Exception as e:
+        return ("🤖 <b>XAU bot chạy nhưng LỖI đọc dữ liệu</b>\n"
+                f"<code>{str(e)[:300]}</code>\nKiểm tra MT5 trên VPS.")
+
+
+def handle_commands(cfg: dict, offset: int) -> int:
+    """Poll Telegram for /check (or /status) and reply with a live health probe."""
+    r = requests.get(TG_API.format(token=cfg["bot_token"], method="getUpdates"),
+                     params={"offset": offset, "timeout": 0}, timeout=20).json()
+    for u in r.get("result", []):
+        offset = u["update_id"] + 1
+        msg = u.get("message") or u.get("channel_post") or {}
+        text = (msg.get("text") or "").strip().lower()
+        cid = str((msg.get("chat") or {}).get("id", ""))
+        if cid == str(cfg["chat_id"]) and (text.startswith("/check")
+                                           or text.startswith("/status")):
+            tg_send(cfg["bot_token"], cfg["chat_id"], _check_reply(cfg))
+    return offset
+
+
 # ---------- data ----------
 def fresh_ohlcv(tf: str) -> pd.DataFrame:
     if DATA_SOURCE == "mt5":
@@ -335,14 +379,10 @@ def main() -> int:
     interval = args.loop or cfg["poll_seconds"]
     if interval > 0:
         print(f"polling every {interval}s — Ctrl+C to stop")
-        tg_send(cfg["bot_token"], cfg["chat_id"],
-                f"🟢 <b>XAU bot khởi động</b>\nNguồn {SOURCE} · {','.join(cfg['timeframes'])} "
-                f"· loop {interval}s\nGiám sát lỗi: BẬT")
         err_streak = 0
         in_error = False
         ALERT_AFTER = 3                       # alert after N consecutive failed passes
-        last_hb = pd.Timestamp.now(tz="UTC")
-        HEARTBEAT_H = float(os.environ.get("HEARTBEAT_HOURS", "24"))
+        tg_offset = _tg_init_offset(cfg["bot_token"])    # skip old /check backlog
         while True:
             print(f"[{pd.Timestamp.now(tz='UTC').isoformat()}] checking...")
             try:
@@ -350,16 +390,7 @@ def main() -> int:
             except Exception as e:
                 print(f"  pass ERROR {e}")
                 errors, last_err = 99, f"pass: {e}"
-            now = pd.Timestamp.now(tz="UTC")
-            if HEARTBEAT_H > 0 and (now - last_hb).total_seconds() >= HEARTBEAT_H * 3600:
-                try:
-                    d = signal_db.summary()
-                    tg_send(cfg["bot_token"], cfg["chat_id"],
-                            f"💓 <b>XAU bot OK</b> ({SOURCE})\nDB: {d['total']} signal · "
-                            f"open {d['open_n']} · WR {d['winrate']:.0%} · expR {d['exp_r']:+.2f}")
-                except Exception:
-                    pass
-                last_hb = now
+            # Alert ONLY on error (and once on recovery).
             if errors > 0:
                 err_streak += 1
                 if err_streak >= ALERT_AFTER and not in_error:
@@ -373,6 +404,11 @@ def main() -> int:
                             "✅ <b>XAU bot phục hồi</b>\nĐã đọc lại dữ liệu bình thường.")
                 err_streak = 0
                 in_error = False
+            # On-demand /check command from Telegram.
+            try:
+                tg_offset = handle_commands(cfg, tg_offset)
+            except Exception as e:
+                print(f"  cmd poll error {e}")
             time.sleep(interval)
     else:
         s, e, _ = run_once(cfg)
