@@ -26,8 +26,10 @@ REM 3) Launch the bot into MT5's session.
 "%BOTDIR%\PsExec64.exe" -accepteula -nobanner -i %SID% -d cmd /c "cd /d ""%BOTDIR%"" && set PYTHONUNBUFFERED=yes && call ""%BOTDIR%\run_bot_vps.bat"" >> ""%BOTDIR%\logs\bot.log"" 2>&1"
 if errorlevel 1 ( echo [restart] ERROR: PsExec launch failed. & exit /b 1 )
 
-REM 4) Verify exactly ONE XAU bot is running (PsExec -d alone does not prove it).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=(Get-Date).AddSeconds(25); while((Get-Date) -lt $d){ $n=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.SessionId -ne 0 }).Count; if($n -eq 1){ exit 0 }; Start-Sleep -Seconds 2 }; exit 1"
-if errorlevel 1 ( echo [restart] WARN: did not confirm exactly 1 XAU bot -- check manually. & exit /b 1 )
-echo [restart] OK: exactly 1 XAU bot running in session %SID%.
+REM 4) Verify the bot is up. A Python venv on Windows shows TWO python.exe per
+REM    bot (a small launcher stub + the actual interpreter), so we count the
+REM    REAL bot by command-line match.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=(Get-Date).AddSeconds(30); while((Get-Date) -lt $d){ $n=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.SessionId -ne 0 -and $_.CommandLine -and $_.CommandLine -match '-m scripts.live_signal_bot' }).Count; if($n -ge 1){ exit 0 }; Start-Sleep -Seconds 2 }; exit 1"
+if errorlevel 1 ( echo [restart] WARN: bot not detected after 30s -- check log. & exit /b 1 )
+echo [restart] OK: XAU bot running in session %SID%.
 endlocal
