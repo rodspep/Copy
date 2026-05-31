@@ -52,8 +52,8 @@ WARMUP_DAYS = 60
 SYMBOL = "XAUUSD"
 STRATEGY = "ob_fvg_trend"
 # Data source: 'mt5' (real Exness prices on the VPS) or 'paxg' (proxy, cloud/dev).
-DATA_SOURCE = os.environ.get("DATA_SOURCE", "paxg").lower()
-MT5_SYMBOL = os.environ.get("MT5_SYMBOL", "XAUUSDm")
+DATA_SOURCE = os.environ.get("DATA_SOURCE", "paxg").strip().lower()
+MT5_SYMBOL = os.environ.get("MT5_SYMBOL", "XAUUSDm").strip()
 SOURCE = "MT5" if DATA_SOURCE == "mt5" else "PAXG"
 
 
