@@ -110,13 +110,17 @@ def load_cfg() -> dict:
 # ---------- telegram ----------
 def tg_send(token: str, chat_id: str, text: str) -> bool:
     url = TG_API.format(token=token, method="sendMessage")
+    t0 = time.monotonic()
     try:
         r = requests.post(url, json={"chat_id": chat_id, "text": text,
                                      "parse_mode": "HTML",
                                      "disable_web_page_preview": True}, timeout=30)
     except Exception as e:
-        print(f"  [telegram exception] {e}")
+        print(f"  [telegram exception] {e} (after {time.monotonic()-t0:.1f}s)")
         return False
+    dt = time.monotonic() - t0
+    if dt > 2:
+        print(f"  [tg_send] SLOW {dt:.1f}s status={r.status_code}")
     if not r.ok:
         print(f"  [telegram error] {r.status_code} {r.text[:200]}")
     return r.ok
@@ -246,9 +250,16 @@ def _command_loop(cfg: dict) -> None:
     offset = _tg_init_offset(token)
     while True:
         try:
+            _t0 = time.monotonic()
             r = requests.get(TG_API.format(token=token, method="getUpdates"),
                              params={"offset": offset, "timeout": 25},
                              timeout=35).json()
+            _dt = time.monotonic() - _t0
+            # Long-poll returns instantly on a new message, else ~25s on timeout.
+            # A return between 2s and 24s with NO updates == a stall/hiccup worth
+            # seeing (it's a window where commands could have queued).
+            if 2 < _dt < 24 and not r.get("result"):
+                print(f"  [cmd] getUpdates returned empty after {_dt:.1f}s (stall?)")
             # 409 in steady state == a SECOND consumer is polling this same bot
             # token (e.g. a leftover Railway worker). Telegram splits updates
             # between consumers → commands feel laggy/dropped. Log it loudly.
