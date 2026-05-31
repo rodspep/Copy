@@ -49,6 +49,15 @@ from src.strategies.xau.ob_fvg_trend import XauObFvgTrend
 CFG_PATH = Path("configs/telegram.json")
 TG_API = "https://api.telegram.org/bot{token}/{method}"
 
+# Pause flag: when this file exists, the bot skips NEW signal alerts but still
+# resolves already-open signals (so trades you've taken still get closed). The
+# flag is on disk so a restart doesn't accidentally un-pause you.
+PAUSE_FLAG = Path("logs/paused.flag")
+
+
+def is_paused() -> bool:
+    return PAUSE_FLAG.exists()
+
 DEPLOY_PARAMS = {
     "swing_left": 3, "swing_right": 3, "ema_fast": 50, "ema_slow": 100,
     "atr_period": 14, "tol_atr": 0.3, "sl_buf_atr": 1.0, "tp_rr": 3.0,
@@ -108,6 +117,29 @@ def tg_send(token: str, chat_id: str, text: str) -> bool:
     return r.ok
 
 
+BOT_COMMANDS = [
+    ("check",  "Trạng thái bot + dữ liệu"),
+    ("stats",  "Track record (win/loss/R)"),
+    ("last",   "5 signal gần nhất"),
+    ("pause",  "Tạm dừng bắn signal mới"),
+    ("resume", "Tiếp tục bắn signal"),
+]
+
+
+def register_commands(token: str) -> bool:
+    """Push the command list to Telegram so the / menu shows suggestions."""
+    url = TG_API.format(token=token, method="setMyCommands")
+    cmds = [{"command": c, "description": d} for c, d in BOT_COMMANDS]
+    try:
+        r = requests.post(url, json={"commands": cmds}, timeout=15)
+        if not r.ok:
+            print(f"  [setMyCommands] {r.status_code} {r.text[:200]}")
+        return r.ok
+    except Exception as e:
+        print(f"  [setMyCommands exception] {e}")
+        return False
+
+
 def get_chat_id(token: str) -> None:
     url = TG_API.format(token=token, method="getUpdates")
     r = requests.get(url, timeout=30).json()
@@ -148,7 +180,8 @@ def _check_reply() -> str:
     ok = (h["errors"] == 0)
     d = signal_db.summary()
     last = str(h["last_bar"]).replace("+00:00", " UTC")
-    return (f"🤖 <b>XAU bot ĐANG CHẠY</b> (nguồn {SOURCE})\n"
+    state = "⏸ ĐANG TẠM DỪNG (không bắn signal mới)" if is_paused() else "ĐANG CHẠY"
+    return (f"🤖 <b>XAU bot {state}</b> (nguồn {SOURCE})\n"
             f"Đọc dữ liệu: {'✅ OK' if ok else '⚠️ LỖI'} (lần cuối {_age(h['data_at'])})\n"
             f"Vòng quét gần nhất: {_age(h['loop_at'])}\n"
             f"Nến {h['tf']} cuối: {last} · giá {h['price']:.2f}\n"
@@ -201,6 +234,26 @@ def _command_loop(cfg: dict) -> None:
                     tg_send(token, chat, _stats_reply())
                 elif text.startswith("/last"):
                     tg_send(token, chat, _last_reply())
+                elif text.startswith("/pause") or text.startswith("/stop"):
+                    if is_paused():
+                        tg_send(token, chat, "⏸ Bot đã ở trạng thái tạm dừng từ trước.")
+                    else:
+                        PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                        PAUSE_FLAG.write_text(pd.Timestamp.now(tz="UTC").isoformat(),
+                                              encoding="utf-8")
+                        tg_send(token, chat, "⏸ <b>Đã TẠM DỪNG</b> bắn signal mới.\n"
+                                "Lệnh đang mở vẫn được resolve khi chạm TP/SL.\n"
+                                "Gõ /resume để chạy lại.")
+                elif text.startswith("/resume") or text.startswith("/start"):
+                    if not is_paused():
+                        tg_send(token, chat, "▶️ Bot đang chạy bình thường — không cần resume.")
+                    else:
+                        try:
+                            PAUSE_FLAG.unlink()
+                        except FileNotFoundError:
+                            pass
+                        tg_send(token, chat, "▶️ <b>Đã TIẾP TỤC</b> bắn signal.\n"
+                                "Bot sẽ quét lại ở vòng kế.")
         except Exception as e:
             print(f"  cmd loop error {e}")
             time.sleep(5)
@@ -359,6 +412,7 @@ def run_once(cfg: dict) -> int:
     sent = 0
     errors = 0
     last_err = ""
+    paused = is_paused()
     for tf in cfg["timeframes"]:
         try:
             s = check_tf(tf, cfg)
@@ -368,6 +422,9 @@ def run_once(cfg: dict) -> int:
             last_err = f"{tf}: {e}"
             continue
         if not s:
+            continue
+        if paused:
+            print(f"  {tf}: [paused] signal detected at {s['ts']} but NOT sent/saved")
             continue
         if tg_send(cfg["bot_token"], cfg["chat_id"], format_msg(s, cfg["risk_pct"])):
             rec = {
@@ -429,6 +486,7 @@ def main() -> int:
     interval = args.loop or cfg["poll_seconds"]
     if interval > 0:
         print(f"polling every {interval}s — Ctrl+C to stop")
+        register_commands(cfg["bot_token"])
         # Separate thread handles /check via long-polling → replies in ~1s,
         # independent of the 60s market loop.
         threading.Thread(target=_command_loop, args=(cfg,), daemon=True).start()
