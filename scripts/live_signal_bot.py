@@ -244,68 +244,89 @@ def _last_reply(n: int = 5) -> str:
     return "\n".join(lines)
 
 
+# Command word (without leading /) → kind. Aliases collapse to one kind.
+_CMD_KINDS = {
+    "check": "check", "status": "check",
+    "stats": "stats",
+    "last": "last",
+    "pause": "pause", "stop": "pause",
+    "resume": "resume", "start": "resume",
+}
+
+
+def _classify(text: str) -> str | None:
+    """Map a message to a command kind, or None. Parses the exact command token
+    so '/checkpoint' is NOT '/check'; handles the '/check@BotName' group suffix."""
+    if not text.startswith("/"):
+        return None
+    word = text[1:].split()[0].split("@")[0]   # '/check@bot extra' → 'check'
+    return _CMD_KINDS.get(word)
+
+
+def _handle_command(token: str, chat: str, kind: str) -> None:
+    if kind == "check":
+        tg_send(token, chat, _check_reply())
+    elif kind == "stats":
+        tg_send(token, chat, _stats_reply())
+    elif kind == "last":
+        tg_send(token, chat, _last_reply())
+    elif kind == "pause":
+        if is_paused():
+            tg_send(token, chat, "⏸ Bot đã ở trạng thái tạm dừng từ trước.")
+        else:
+            PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+            PAUSE_FLAG.write_text(pd.Timestamp.now(tz="UTC").isoformat(), encoding="utf-8")
+            tg_send(token, chat, "⏸ <b>Đã TẠM DỪNG</b> bắn signal mới.\n"
+                    "Lệnh đang mở vẫn được resolve khi chạm TP/SL.\n"
+                    "Gõ /resume để chạy lại.")
+    elif kind == "resume":
+        if not is_paused():
+            tg_send(token, chat, "▶️ Bot đang chạy bình thường — không cần resume.")
+        else:
+            try:
+                PAUSE_FLAG.unlink()
+            except FileNotFoundError:
+                pass
+            tg_send(token, chat, "▶️ <b>Đã TIẾP TỤC</b> bắn signal.\n"
+                    "Bot sẽ quét lại ở vòng kế.")
+
+
 def _command_loop(cfg: dict) -> None:
-    """Background long-polling loop → replies to commands within ~1s."""
+    """Background long-polling loop. Replies are COALESCED per getUpdates batch:
+    a burst of identical commands (e.g. mashing /check) yields ONE reply, not
+    one per message. This is what kept the bot responsive — replying to every
+    message in a burst tripped Telegram group flood-control, whose multi-second
+    held sends blocked this single thread from polling (the "đơ" / freeze)."""
     token, chat = cfg["bot_token"], str(cfg["chat_id"])
     offset = _tg_init_offset(token)
     while True:
         try:
-            _t0 = time.monotonic()
             r = requests.get(TG_API.format(token=token, method="getUpdates"),
                              params={"offset": offset, "timeout": 25},
                              timeout=35).json()
-            _dt = time.monotonic() - _t0
-            # Long-poll returns instantly on a new message, else ~25s on timeout.
-            # A return between 2s and 24s with NO updates == a stall/hiccup worth
-            # seeing (it's a window where commands could have queued).
-            if 2 < _dt < 24 and not r.get("result"):
-                print(f"  [cmd] getUpdates returned empty after {_dt:.1f}s (stall?)")
-            # 409 in steady state == a SECOND consumer is polling this same bot
-            # token (e.g. a leftover Railway worker). Telegram splits updates
-            # between consumers → commands feel laggy/dropped. Log it loudly.
             if not r.get("ok", True) and "Conflict" in str(r.get("description", "")):
-                print(f"  [cmd] ⚠️ getUpdates CONFLICT — another consumer is polling "
-                      f"this bot token: {r.get('description')}")
+                print(f"  [cmd] ⚠️ getUpdates CONFLICT — another consumer polls this "
+                      f"bot token: {r.get('description')}")
+            # Collect this batch's commands, keeping only the LAST of each kind
+            # (queries are idempotent; for pause/resume the latest = intended
+            # final state). dict preserves insertion/update order in 3.7+.
+            batch: dict[str, int] = {}
+            n_msgs = 0
             for u in r.get("result", []):
                 offset = u["update_id"] + 1
                 msg = u.get("message") or u.get("channel_post") or {}
-                text = (msg.get("text") or "").strip().lower()
                 cid = str((msg.get("chat") or {}).get("id", ""))
                 if cid != chat:
                     continue
-                if text:
-                    recv = pd.Timestamp.now(tz="UTC")
-                    edits = msg.get("edit_date")
-                    sent_epoch = edits or msg.get("date")
-                    lag = (recv.timestamp() - sent_epoch) if sent_epoch else -1
-                    print(f"  [cmd] recv {text.split()[0]} · lag {lag:.1f}s "
-                          f"(sent→received)")
-                if text.startswith("/check") or text.startswith("/status"):
-                    tg_send(token, chat, _check_reply())
-                elif text.startswith("/stats"):
-                    tg_send(token, chat, _stats_reply())
-                elif text.startswith("/last"):
-                    tg_send(token, chat, _last_reply())
-                elif text.startswith("/pause") or text.startswith("/stop"):
-                    if is_paused():
-                        tg_send(token, chat, "⏸ Bot đã ở trạng thái tạm dừng từ trước.")
-                    else:
-                        PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
-                        PAUSE_FLAG.write_text(pd.Timestamp.now(tz="UTC").isoformat(),
-                                              encoding="utf-8")
-                        tg_send(token, chat, "⏸ <b>Đã TẠM DỪNG</b> bắn signal mới.\n"
-                                "Lệnh đang mở vẫn được resolve khi chạm TP/SL.\n"
-                                "Gõ /resume để chạy lại.")
-                elif text.startswith("/resume") or text.startswith("/start"):
-                    if not is_paused():
-                        tg_send(token, chat, "▶️ Bot đang chạy bình thường — không cần resume.")
-                    else:
-                        try:
-                            PAUSE_FLAG.unlink()
-                        except FileNotFoundError:
-                            pass
-                        tg_send(token, chat, "▶️ <b>Đã TIẾP TỤC</b> bắn signal.\n"
-                                "Bot sẽ quét lại ở vòng kế.")
+                kind = _classify((msg.get("text") or "").strip().lower())
+                if kind:
+                    n_msgs += 1
+                    batch.pop(kind, None)        # move to end (most recent wins)
+                    batch[kind] = u["update_id"]
+            if n_msgs > len(batch):
+                print(f"  [cmd] coalesced {n_msgs} commands → {len(batch)} repl(y/ies)")
+            for kind in batch:
+                _handle_command(token, chat, kind)
         except Exception as e:
             print(f"  cmd loop error {e}")
             time.sleep(5)
