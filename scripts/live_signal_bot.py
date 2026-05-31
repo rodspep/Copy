@@ -62,7 +62,7 @@ def load_cfg() -> dict:
     cfg: dict = {}
     if CFG_PATH.exists():
         try:
-            cfg = json.loads(CFG_PATH.read_text(encoding="utf-8"))
+            cfg = json.loads(CFG_PATH.read_text(encoding="utf-8-sig"))
         except Exception:
             cfg = {}
     # Environment variables override the file (Railway / production).
