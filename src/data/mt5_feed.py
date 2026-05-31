@@ -47,8 +47,9 @@ def init(account: int | None = None, password: str = "", server: str = "",
     password = (password or os.environ.get("MT5_PASSWORD", "")).strip()
     server = (server or os.environ.get("MT5_SERVER", "")).strip()
 
+    tries = max(1, retries)
     last = ""
-    for attempt in range(max(1, retries)):
+    for attempt in range(tries):
         ok = mt5.initialize(path) if path else mt5.initialize()
         if not ok:
             last = f"initialize failed: {mt5.last_error()}"
@@ -61,8 +62,9 @@ def init(account: int | None = None, password: str = "", server: str = "",
         else:
             _INITED = True
             return
-        time.sleep(backoff)
-    raise RuntimeError(f"mt5 init failed after {retries} tries: {last}")
+        if attempt < tries - 1:          # no sleep after the final failed attempt
+            time.sleep(backoff)
+    raise RuntimeError(f"mt5 init failed after {tries} tries: {last}")
 
 
 def _tf_const(tf: str):

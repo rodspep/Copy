@@ -138,7 +138,7 @@ def fresh_m5() -> pd.DataFrame:
     """5-minute bars for outcome resolution, from the active source."""
     if DATA_SOURCE == "mt5":
         from src.data import mt5_feed
-        return mt5_feed.bars(MT5_SYMBOL, "M5", n=5000)
+        return mt5_feed.bars(MT5_SYMBOL, "M5", n=17280)   # ~60 trading days
     start = str((pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=WARMUP_DAYS)).date())
     return paxg_loader.download(interval="5m", start=start, overwrite=True)
 
@@ -216,14 +216,23 @@ def resolve_open(cfg: dict) -> int:
     if not rows:
         return 0
     m5 = fresh_m5()
+    m5["timestamp"] = pd.to_datetime(m5["timestamp"], utc=True)   # ensure tz-aware
     off = 0.0 if DATA_SOURCE == "mt5" else cfg["price_offset"]
     m5 = m5.assign(high=m5["high"] + off, low=m5["low"] + off)
     closed = 0
     for r in rows:
-        tf_min = TF_MINUTES.get(r["timeframe"], 60)
-        entry_ts = pd.Timestamp(r["signal_bar_ts"]) + pd.Timedelta(minutes=tf_min)
+        if r["timeframe"] not in TF_MINUTES:
+            print(f"  resolve: unknown timeframe {r['timeframe']!r} on #{r['id']} — skip")
+            continue
+        tf_min = TF_MINUTES[r["timeframe"]]
+        ets = pd.Timestamp(r["signal_bar_ts"])
+        ets = ets.tz_localize("UTC") if ets.tzinfo is None else ets.tz_convert("UTC")
+        entry_ts = ets + pd.Timedelta(minutes=tf_min)
         seg = m5[m5["timestamp"] >= entry_ts]      # from entry bar open onward
         if seg.empty:
+            if len(m5) and entry_ts < m5["timestamp"].min():
+                print(f"  resolve: #{r['id']} entry {entry_ts} predates M5 window "
+                      f"{m5['timestamp'].min()} — cannot resolve, widen fresh_m5 n")
             continue
         long = r["direction"] == "long"
         sl, tp = r["sl"], r["tp"]
@@ -231,17 +240,20 @@ def resolve_open(cfg: dict) -> int:
         for _, b in seg.iterrows():
             lo, hi = b["low"], b["high"]
             if long:
-                if lo <= sl:   hit = ("loss", sl); break    # conservative: SL first
-                if hi >= tp:   hit = ("win", tp); break
+                if lo <= sl:   hit = ("loss", sl, b["timestamp"]); break  # conservative: SL first
+                if hi >= tp:   hit = ("win", tp, b["timestamp"]); break
             else:
-                if hi >= sl:   hit = ("loss", sl); break
-                if lo <= tp:   hit = ("win", tp); break
+                if hi >= sl:   hit = ("loss", sl, b["timestamp"]); break
+                if lo <= tp:   hit = ("win", tp, b["timestamp"]); break
         if hit:
-            status, px = hit
+            status, px, ts = hit
             result_r = r["rr"] if status == "win" else -1.0
-            ts_close = b["timestamp"].isoformat()
-            signal_db.close_signal(r["id"], ts_close, float(px), float(result_r), status)
-            tg_send(cfg["bot_token"], cfg["chat_id"], close_msg(r, result_r, status))
+            # Send the close alert FIRST; only mark resolved if it was delivered,
+            # so a Telegram failure is retried next pass (no lost notification).
+            if not tg_send(cfg["bot_token"], cfg["chat_id"], close_msg(r, result_r, status)):
+                print(f"  resolve: tg_send failed for #{r['id']} — leaving open to retry")
+                continue
+            signal_db.close_signal(r["id"], ts.isoformat(), float(px), float(result_r), status)
             print(f"  resolved #{r['id']} {r['timeframe']} -> {status} {result_r:+.1f}R")
             closed += 1
     return closed
@@ -269,8 +281,12 @@ def run_once(cfg: dict) -> int:
                 "rr": s["reward_dist"] / s["risk_dist"] if s["risk_dist"] else 0,
                 "source_price": s["raw"], "price_offset": s["offset"], "status": "open",
             }
-            signal_db.insert_signal(rec)
-            print(f"  {tf}: SENT + saved {s['ts']} ({s['action']})")
+            rid = signal_db.insert_signal(rec)
+            if rid is None:
+                print(f"  {tf}: !! ALERT SENT BUT NOT SAVED (dup/constraint) {s['ts']} "
+                      f"— outcome won't be tracked")
+            else:
+                print(f"  {tf}: SENT + saved #{rid} {s['ts']} ({s['action']})")
             sent += 1
     try:
         resolve_open(cfg)

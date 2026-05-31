@@ -26,35 +26,67 @@ def _conn(path: str | None = None) -> sqlite3.Connection:
     return c
 
 
+_UNIQUE_COLS = ["source", "symbol", "strategy", "timeframe", "signal_bar_ts"]
+_DATA_COLS = ("sent_at,symbol,source,strategy,timeframe,direction,signal_bar_ts,"
+              "entry,sl,tp,risk_dist,reward_dist,rr,source_price,price_offset,"
+              "status,closed_at,exit_price,result_r")
+_CREATE = """CREATE TABLE IF NOT EXISTS signals(
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    sent_at TEXT, symbol TEXT, source TEXT, strategy TEXT, timeframe TEXT,
+    direction TEXT, signal_bar_ts TEXT, entry REAL, sl REAL, tp REAL,
+    risk_dist REAL, reward_dist REAL, rr REAL, source_price REAL,
+    price_offset REAL, status TEXT DEFAULT 'open', closed_at TEXT,
+    exit_price REAL, result_r REAL,
+    UNIQUE(source, symbol, strategy, timeframe, signal_bar_ts)
+)"""
+
+
+def _unique_ok(c: sqlite3.Connection) -> bool:
+    """True if the signals table already has the desired composite UNIQUE key."""
+    for idx in c.execute("PRAGMA index_list('signals')").fetchall():
+        if idx["unique"]:
+            cols = [r["name"] for r in
+                    c.execute(f'PRAGMA index_info("{idx["name"]}")').fetchall()]
+            if cols == _UNIQUE_COLS:
+                return True
+    return False
+
+
+def _migrate(c: sqlite3.Connection) -> None:
+    """Rebuild signals with the new UNIQUE key, copying only columns that exist
+    in BOTH old and new tables, atomically (rolls back on any error)."""
+    try:
+        c.execute("ALTER TABLE signals RENAME TO _signals_old")
+        c.execute(_CREATE)
+        old = {r["name"] for r in
+               c.execute("PRAGMA table_info('_signals_old')").fetchall()}
+        cols = ",".join(x for x in _DATA_COLS.split(",") if x in old)
+        if cols:
+            c.execute(f"INSERT OR IGNORE INTO signals ({cols}) "
+                      f"SELECT {cols} FROM _signals_old")
+        c.execute("DROP TABLE _signals_old")
+        c.commit()
+    except Exception:
+        c.rollback()                          # DDL is transactional in sqlite3
+        raise
+
+
 def init_db(path: str | None = None) -> None:
     c = _conn(path)
-    c.execute(
-        """CREATE TABLE IF NOT EXISTS signals(
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            sent_at       TEXT,
-            symbol        TEXT,
-            source        TEXT,
-            strategy      TEXT,
-            timeframe     TEXT,
-            direction     TEXT,
-            signal_bar_ts TEXT,
-            entry         REAL,
-            sl            REAL,
-            tp            REAL,
-            risk_dist     REAL,
-            reward_dist   REAL,
-            rr            REAL,
-            source_price  REAL,
-            price_offset  REAL,
-            status        TEXT DEFAULT 'open',
-            closed_at     TEXT,
-            exit_price    REAL,
-            result_r      REAL,
-            UNIQUE(source, symbol, strategy, timeframe, signal_bar_ts)
-        )"""
-    )
-    c.commit()
-    c.close()
+    try:
+        c.execute("PRAGMA busy_timeout=5000")
+        existed = c.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signals'"
+        ).fetchone() is not None
+        c.execute(_CREATE)
+        c.commit()
+        # Migrate an older table whose UNIQUE key is narrower (e.g. just
+        # (timeframe, signal_bar_ts)) — SQLite can't drop a table-level unique
+        # in place, so rebuild and copy.
+        if existed and not _unique_ok(c):
+            _migrate(c)
+    finally:
+        c.close()
 
 
 def exists(timeframe: str, bar_ts: str, source: str = "", symbol: str = "",
