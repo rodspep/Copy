@@ -263,11 +263,15 @@ def resolve_open(cfg: dict) -> int:
 def run_once(cfg: dict) -> int:
     signal_db.init_db()
     sent = 0
+    errors = 0
+    last_err = ""
     for tf in cfg["timeframes"]:
         try:
             s = check_tf(tf, cfg)
         except Exception as e:
             print(f"  {tf}: ERROR {e}")
+            errors += 1
+            last_err = f"{tf}: {e}"
             continue
         if not s:
             continue
@@ -292,7 +296,9 @@ def run_once(cfg: dict) -> int:
         resolve_open(cfg)
     except Exception as e:
         print(f"  resolve ERROR {e}")
-    return sent
+        errors += 1
+        last_err = f"resolve: {e}"
+    return sent, errors, last_err
 
 
 def print_status() -> None:
@@ -329,15 +335,48 @@ def main() -> int:
     interval = args.loop or cfg["poll_seconds"]
     if interval > 0:
         print(f"polling every {interval}s — Ctrl+C to stop")
+        tg_send(cfg["bot_token"], cfg["chat_id"],
+                f"🟢 <b>XAU bot khởi động</b>\nNguồn {SOURCE} · {','.join(cfg['timeframes'])} "
+                f"· loop {interval}s\nGiám sát lỗi: BẬT")
+        err_streak = 0
+        in_error = False
+        ALERT_AFTER = 3                       # alert after N consecutive failed passes
+        last_hb = pd.Timestamp.now(tz="UTC")
+        HEARTBEAT_H = float(os.environ.get("HEARTBEAT_HOURS", "24"))
         while True:
             print(f"[{pd.Timestamp.now(tz='UTC').isoformat()}] checking...")
             try:
-                run_once(cfg)
+                _, errors, last_err = run_once(cfg)
             except Exception as e:
                 print(f"  pass ERROR {e}")
+                errors, last_err = 99, f"pass: {e}"
+            now = pd.Timestamp.now(tz="UTC")
+            if HEARTBEAT_H > 0 and (now - last_hb).total_seconds() >= HEARTBEAT_H * 3600:
+                try:
+                    d = signal_db.summary()
+                    tg_send(cfg["bot_token"], cfg["chat_id"],
+                            f"💓 <b>XAU bot OK</b> ({SOURCE})\nDB: {d['total']} signal · "
+                            f"open {d['open_n']} · WR {d['winrate']:.0%} · expR {d['exp_r']:+.2f}")
+                except Exception:
+                    pass
+                last_hb = now
+            if errors > 0:
+                err_streak += 1
+                if err_streak >= ALERT_AFTER and not in_error:
+                    tg_send(cfg["bot_token"], cfg["chat_id"],
+                            f"⚠️ <b>XAU bot LỖI</b>\n{err_streak} vòng liên tiếp lỗi.\n"
+                            f"<code>{last_err[:300]}</code>\nBot vẫn tự retry — kiểm tra VPS/MT5.")
+                    in_error = True
+            else:
+                if in_error:
+                    tg_send(cfg["bot_token"], cfg["chat_id"],
+                            "✅ <b>XAU bot phục hồi</b>\nĐã đọc lại dữ liệu bình thường.")
+                err_streak = 0
+                in_error = False
             time.sleep(interval)
     else:
-        print(f"done — {run_once(cfg)} signal(s) sent")
+        s, e, _ = run_once(cfg)
+        print(f"done — {s} signal(s), {e} error(s)")
     return 0
 
 
