@@ -156,8 +156,31 @@ def _check_reply() -> str:
             f"win {d['wins']} / loss {d['losses']} · expR {d['exp_r']:+.2f}")
 
 
+def _stats_reply() -> str:
+    d = signal_db.summary()
+    closed = (d["wins"] or 0) + (d["losses"] or 0)
+    return (f"📊 <b>Track record</b> ({STRATEGY})\n"
+            f"Tổng: {d['total']} signal · đang mở: {d['open_n']}\n"
+            f"Đã đóng: {closed} (win {d['wins']} / loss {d['losses']})\n"
+            f"Win-rate: {d['winrate']:.0%} · Tổng R: {d['sum_r']:+.1f} · "
+            f"Kỳ vọng: {d['exp_r']:+.2f}R/lệnh")
+
+
+def _last_reply(n: int = 5) -> str:
+    rows = signal_db.recent(n)
+    if not rows:
+        return "📭 Chưa có signal nào."
+    lines = [f"📜 <b>{len(rows)} signal gần nhất</b>:"]
+    for r in rows:
+        res = "" if r["result_r"] is None else f" → {r['result_r']:+.1f}R"
+        lines.append(f"#{r['id']} {r['timeframe']} {r['direction']} "
+                     f"{r['signal_bar_ts'][:16].replace('T',' ')} "
+                     f"@{r['entry']:.2f} [{r['status']}{res}]")
+    return "\n".join(lines)
+
+
 def _command_loop(cfg: dict) -> None:
-    """Background long-polling loop → replies to /check (/status) within ~1s."""
+    """Background long-polling loop → replies to commands within ~1s."""
     token, chat = cfg["bot_token"], str(cfg["chat_id"])
     offset = _tg_init_offset(token)
     while True:
@@ -170,9 +193,14 @@ def _command_loop(cfg: dict) -> None:
                 msg = u.get("message") or u.get("channel_post") or {}
                 text = (msg.get("text") or "").strip().lower()
                 cid = str((msg.get("chat") or {}).get("id", ""))
-                if cid == chat and (text.startswith("/check")
-                                    or text.startswith("/status")):
+                if cid != chat:
+                    continue
+                if text.startswith("/check") or text.startswith("/status"):
                     tg_send(token, chat, _check_reply())
+                elif text.startswith("/stats"):
+                    tg_send(token, chat, _stats_reply())
+                elif text.startswith("/last"):
+                    tg_send(token, chat, _last_reply())
         except Exception as e:
             print(f"  cmd loop error {e}")
             time.sleep(5)
