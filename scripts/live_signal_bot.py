@@ -33,7 +33,12 @@ import json
 import os
 import threading
 import time
+from datetime import timedelta, timezone
 from pathlib import Path
+
+# Display timezone: Vietnam (UTC+7, no DST). Data stays in UTC; only formatting
+# for Telegram messages uses this. Fixed offset → no tzdata dependency on Windows.
+VN_TZ = timezone(timedelta(hours=7))
 
 import pandas as pd
 import requests
@@ -172,43 +177,66 @@ def _age(ts) -> str:
     return f"{(pd.Timestamp.now(tz='UTC') - ts).total_seconds():.0f}s trước"
 
 
+def _fmt_ts(ts) -> str:
+    """Any ISO string / pandas Timestamp → 'YYYY-MM-DD HH:MM GMT+7' (giờ VN).
+
+    All data is stored/processed in UTC; this converts for DISPLAY only. A fixed
+    +7h offset is used (Vietnam has no DST) so we don't depend on the tzdata
+    package being installed on the Windows VPS.
+    """
+    t = pd.Timestamp(ts)
+    t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+    return t.tz_convert(VN_TZ).strftime("%Y-%m-%d %H:%M GMT+7")
+
+
 def _check_reply() -> str:
     """Health reply from the cached snapshot (no MT5 call from this thread)."""
     h = _HEALTH
     if h["data_at"] is None:
-        return "🤖 <b>XAU bot vừa khởi động</b>, chưa có lần đọc dữ liệu — thử lại sau ~1 phút."
+        return "🤖 <b>XAU bot vừa khởi động</b>\nChưa có lần đọc dữ liệu — thử lại sau ~1 phút."
     ok = (h["errors"] == 0)
     d = signal_db.summary()
-    last = str(h["last_bar"]).replace("+00:00", " UTC")
-    state = "⏸ ĐANG TẠM DỪNG (không bắn signal mới)" if is_paused() else "ĐANG CHẠY"
-    return (f"🤖 <b>XAU bot {state}</b> (nguồn {SOURCE})\n"
-            f"Đọc dữ liệu: {'✅ OK' if ok else '⚠️ LỖI'} (lần cuối {_age(h['data_at'])})\n"
-            f"Vòng quét gần nhất: {_age(h['loop_at'])}\n"
-            f"Nến {h['tf']} cuối: {last} · giá {h['price']:.2f}\n"
-            f"DB: {d['total']} signal · open {d['open_n']} · "
-            f"win {d['wins']} / loss {d['losses']} · expR {d['exp_r']:+.2f}")
+    last = _fmt_ts(h["last_bar"])
+    if is_paused():
+        header = "⏸ <b>XAU bot — TẠM DỪNG</b>\nkhông bắn signal mới · nguồn " + SOURCE
+    else:
+        header = "🤖 <b>XAU bot — ĐANG CHẠY</b>\nnguồn " + SOURCE
+    data_line = (f"✅ Dữ liệu OK · đọc {_age(h['data_at'])}" if ok
+                 else f"⚠️ Dữ liệu LỖI · thử {_age(h['data_at'])}")
+    return (f"{header}\n\n"
+            f"{data_line}\n"
+            f"🔄 Vòng quét: {_age(h['loop_at'])}\n"
+            f"🕐 Nến {h['tf']}: {last}\n"
+            f"💰 Giá: {h['price']:.2f}\n\n"
+            f"📊 {d['total']} signal · đang mở {d['open_n']}\n"
+            f"🏆 win {d['wins']} / loss {d['losses']} · kỳ vọng {d['exp_r']:+.2f}R")
 
 
 def _stats_reply() -> str:
     d = signal_db.summary()
     closed = (d["wins"] or 0) + (d["losses"] or 0)
-    return (f"📊 <b>Track record</b> ({STRATEGY})\n"
-            f"Tổng: {d['total']} signal · đang mở: {d['open_n']}\n"
-            f"Đã đóng: {closed} (win {d['wins']} / loss {d['losses']})\n"
-            f"Win-rate: {d['winrate']:.0%} · Tổng R: {d['sum_r']:+.1f} · "
-            f"Kỳ vọng: {d['exp_r']:+.2f}R/lệnh")
+    return (f"📊 <b>Track record</b>\n"
+            f"{STRATEGY}\n\n"
+            f"Tổng signal:  <b>{d['total']}</b>  ·  đang mở {d['open_n']}\n"
+            f"Đã đóng:  {closed}  (✅ {d['wins']} / ❌ {d['losses']})\n\n"
+            f"🎯 Win-rate:  <b>{d['winrate']:.0%}</b>\n"
+            f"💰 Tổng R:  <b>{d['sum_r']:+.1f}</b>\n"
+            f"📈 Kỳ vọng:  <b>{d['exp_r']:+.2f}R</b> / lệnh")
 
 
 def _last_reply(n: int = 5) -> str:
     rows = signal_db.recent(n)
     if not rows:
         return "📭 Chưa có signal nào."
-    lines = [f"📜 <b>{len(rows)} signal gần nhất</b>:"]
+    icons = {"win": "✅", "loss": "❌", "open": "🟡"}
+    lines = [f"📜 <b>{len(rows)} signal gần nhất</b>\n"]
     for r in rows:
-        res = "" if r["result_r"] is None else f" → {r['result_r']:+.1f}R"
-        lines.append(f"#{r['id']} {r['timeframe']} {r['direction']} "
-                     f"{r['signal_bar_ts'][:16].replace('T',' ')} "
-                     f"@{r['entry']:.2f} [{r['status']}{res}]")
+        icon = icons.get(r["status"], "•")
+        when = _fmt_ts(r["signal_bar_ts"])
+        side = r["direction"].upper()
+        res = "đang mở" if r["result_r"] is None else f"{r['result_r']:+.1f}R"
+        lines.append(f"{icon} <b>#{r['id']}</b> {r['timeframe']} {side} @{r['entry']:.2f}\n"
+                     f"     {when} · {res}")
     return "\n".join(lines)
 
 
@@ -317,34 +345,42 @@ def check_tf(tf: str, cfg: dict) -> dict | None:
 
 def format_msg(s: dict, risk_pct: float) -> str:
     long = s["action"] == "enter_long"
-    arrow = "🟢 LONG (mua)" if long else "🔴 SHORT (bán)"
+    side = "🟢 <b>LONG</b> (mua)" if long else "🔴 <b>SHORT</b> (bán)"
     rr = s["reward_dist"] / s["risk_dist"] if s["risk_dist"] else 0
-    ts = s["ts"].replace("+00:00", " UTC")
+    ts = _fmt_ts(s["ts"])
     if SOURCE == "MT5":
         src = "Exness MT5 (giá thật)"
     else:
         src = "XAU (PAXG +offset)" if s["offset"] else "PAXG (proxy vàng)"
+    # Monospace block → Entry/TP/SL columns line up; TP shown as +reward, SL as -risk.
+    table = (
+        f"Entry  {s['entry']:>9.2f}\n"
+        f"TP     {s['tp']:>9.2f}  {s['reward_dist']:>+8.2f}\n"
+        f"SL     {s['sl']:>9.2f}  {-s['risk_dist']:>+8.2f}\n"
+        f"R:R    1 : {rr:.1f}"
+    )
     return (
-        f"🟡 <b>XAU SIGNAL</b> — ob_fvg_trend\n"
-        f"📊 Khung <b>{s['tf']}</b> | {arrow}\n"
-        f"🕐 Nến đóng: {ts}\n"
-        f"💰 Giá nguồn: {src}\n\n"
-        f"➡️ <b>Entry</b> (vào khi nến KẾ mở): <b>{s['entry']:.2f}</b>\n"
-        f"🛑 <b>SL</b>: {s['sl']:.2f}  ({s['risk_dist']:.2f})\n"
-        f"🎯 <b>TP</b>: {s['tp']:.2f}  ({s['reward_dist']:.2f})  |  R:R {rr:.1f}\n"
-        f"⚖️ Risk đề xuất: {risk_pct:.1f}% tài khoản\n\n"
-        f"📌 SL/TP CỐ ĐỊNH — đặt 2 lệnh chờ rồi để chạy.\n"
-        f"⚠️ Tracking — CHƯA vào tiền thật."
+        f"🟡 <b>XAU — TÍN HIỆU MỚI</b>\n\n"
+        f"{side}   ·   khung <b>{s['tf']}</b>\n"
+        f"🕐 {ts}\n"
+        f"💰 {src}\n\n"
+        f"<pre>{table}</pre>\n"
+        f"⚖️ Risk đề xuất: <b>{risk_pct:.1f}%</b> tài khoản\n\n"
+        f"📌 Đặt 2 lệnh chờ — vào khi nến KẾ mở, SL/TP cố định.\n"
+        f"⚠️ Đang tracking — CHƯA vào tiền thật."
     )
 
 
 def close_msg(row, result_r: float, status: str) -> str:
-    icon = "✅ WIN" if status == "win" else "❌ LOSS"
-    return (f"{icon} — {row['timeframe']} {row['direction'].upper()}\n"
-            f"Mở: {row['signal_bar_ts'].replace('+00:00',' UTC')}\n"
-            f"Entry {row['entry']:.2f} → "
-            f"{'TP' if status=='win' else 'SL'} {row['tp'] if status=='win' else row['sl']:.2f}\n"
-            f"Kết quả: <b>{result_r:+.2f}R</b>")
+    win = status == "win"
+    icon = "✅ <b>WIN</b>" if win else "❌ <b>LOSS</b>"
+    exit_label = "TP" if win else "SL"
+    exit_px = row["tp"] if win else row["sl"]
+    opened = _fmt_ts(row["signal_bar_ts"])
+    return (f"{icon}   {row['timeframe']} {row['direction'].upper()}   "
+            f"<b>{result_r:+.2f}R</b>\n\n"
+            f"Entry {row['entry']:.2f}  →  {exit_label} {exit_px:.2f}\n"
+            f"🕐 Mở: {opened}")
 
 
 # Bar duration per timeframe (minutes) — used to find the entry candle's open.
