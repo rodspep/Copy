@@ -249,6 +249,12 @@ def _command_loop(cfg: dict) -> None:
             r = requests.get(TG_API.format(token=token, method="getUpdates"),
                              params={"offset": offset, "timeout": 25},
                              timeout=35).json()
+            # 409 in steady state == a SECOND consumer is polling this same bot
+            # token (e.g. a leftover Railway worker). Telegram splits updates
+            # between consumers → commands feel laggy/dropped. Log it loudly.
+            if not r.get("ok", True) and "Conflict" in str(r.get("description", "")):
+                print(f"  [cmd] ⚠️ getUpdates CONFLICT — another consumer is polling "
+                      f"this bot token: {r.get('description')}")
             for u in r.get("result", []):
                 offset = u["update_id"] + 1
                 msg = u.get("message") or u.get("channel_post") or {}
@@ -256,6 +262,13 @@ def _command_loop(cfg: dict) -> None:
                 cid = str((msg.get("chat") or {}).get("id", ""))
                 if cid != chat:
                     continue
+                if text:
+                    recv = pd.Timestamp.now(tz="UTC")
+                    edits = msg.get("edit_date")
+                    sent_epoch = edits or msg.get("date")
+                    lag = (recv.timestamp() - sent_epoch) if sent_epoch else -1
+                    print(f"  [cmd] recv {text.split()[0]} · lag {lag:.1f}s "
+                          f"(sent→received)")
                 if text.startswith("/check") or text.startswith("/status"):
                     tg_send(token, chat, _check_reply())
                 elif text.startswith("/stats"):
