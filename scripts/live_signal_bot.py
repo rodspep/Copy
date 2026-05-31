@@ -412,7 +412,6 @@ def run_once(cfg: dict) -> int:
     sent = 0
     errors = 0
     last_err = ""
-    paused = is_paused()
     for tf in cfg["timeframes"]:
         try:
             s = check_tf(tf, cfg)
@@ -423,7 +422,9 @@ def run_once(cfg: dict) -> int:
             continue
         if not s:
             continue
-        if paused:
+        # Re-check pause right before the network call so a /pause arriving
+        # mid-pass blocks the alert (snapshotting earlier would race).
+        if is_paused():
             print(f"  {tf}: [paused] signal detected at {s['ts']} but NOT sent/saved")
             continue
         if tg_send(cfg["bot_token"], cfg["chat_id"], format_msg(s, cfg["risk_pct"])):

@@ -28,4 +28,6 @@ echo.
 
 echo [update] restarting XAU bot...
 call C:\mt5-bot\restart_bot.bat
+if errorlevel 1 ( echo [update] WARN: code synced but restart_bot.bat reported failure -- check logs\bot.log + MT5. & exit /b 1 )
+echo [update] OK: code synced + bot restarted.
 endlocal

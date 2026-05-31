@@ -8,19 +8,22 @@ setlocal
 set "BOTDIR=C:\mt5-bot"
 cd /d "%BOTDIR%"
 
-REM 1) Stop every XAU bot (python.exe in a non-zero session). Converges even if
+REM 1) Preflight FIRST: require exactly one interactive MT5 terminal. If this
+REM    aborts we still have the old bot running -- never kill before we know
+REM    we can launch.
+set "SID="
+for /f "usebackq delims=" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'terminal64.exe' -and $_.SessionId -ne 0 } | Select-Object -ExpandProperty SessionId -Unique); if ($s.Count -eq 1) { $s[0] }"`) do set "SID=%%a"
+if not defined SID ( echo [restart] ERROR: need exactly one interactive MT5 terminal -- abort, old bot left running. & exit /b 1 )
+echo [restart] MT5 session = %SID% -- ok to restart.
+
+REM 2) Stop every XAU bot (python.exe in a non-zero session). Converges even if
 REM    duplicates exist. vol (session 0) is untouched.
 for /f "usebackq" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.SessionId -ne 0 } | Select-Object -ExpandProperty ProcessId"`) do (
   echo [restart] stopping XAU bot PID %%p
   taskkill /F /PID %%p >nul 2>&1
 )
 ping -n 3 127.0.0.1 >nul 2>&1
-
-REM 2) Find MT5's session -- require exactly one interactive terminal64.exe.
-set "SID="
-for /f "usebackq delims=" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=@(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'terminal64.exe' -and $_.SessionId -ne 0 } | Select-Object -ExpandProperty SessionId -Unique); if ($s.Count -eq 1) { $s[0] }"`) do set "SID=%%a"
-if not defined SID ( echo [restart] ERROR: need exactly one interactive MT5 terminal -- abort. & exit /b 1 )
-echo [restart] MT5 session = %SID% -- launching XAU bot...
+echo [restart] launching XAU bot into session %SID%...
 
 REM 3) Launch the bot into MT5's session.
 REM PsExec -d returns the spawned PID (>0) as exit code — NOT an error. Don't
