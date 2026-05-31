@@ -23,8 +23,9 @@ if not defined SID ( echo [restart] ERROR: need exactly one interactive MT5 term
 echo [restart] MT5 session = %SID% -- launching XAU bot...
 
 REM 3) Launch the bot into MT5's session.
-"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -i %SID% -d cmd /c "cd /d ""%BOTDIR%"" && set PYTHONUNBUFFERED=yes && call ""%BOTDIR%\run_bot_vps.bat"" >> ""%BOTDIR%\logs\bot.log"" 2>&1"
-if errorlevel 1 ( echo [restart] ERROR: PsExec launch failed. & exit /b 1 )
+REM PsExec -d returns the spawned PID (>0) as exit code — NOT an error. Don't
+REM check errorlevel here; the verify step below is the real success signal.
+"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -i %SID% -d cmd /c "cd /d ""%BOTDIR%"" && set PYTHONUNBUFFERED=yes && call ""%BOTDIR%\run_bot_vps.bat"" >> ""%BOTDIR%\logs\bot.log"" 2>&1" >nul 2>&1
 
 REM 4) Verify the bot is up. A Python venv on Windows shows TWO python.exe per
 REM    bot (a small launcher stub + the actual interpreter), so we count the
