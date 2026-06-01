@@ -24,9 +24,26 @@ import os
 from src.config import DATA_DIR
 from src.data import mt5_feed
 
-# Request size per TF — call returns fewer if that's all the broker keeps.
-DEFAULT_BARS = {"M5": 300_000, "M15": 200_000, "M30": 150_000,
-                "H1": 100_000, "H4": 50_000}
+# Request size per TF. MT5 copy_rates_from_pos rejects counts above the
+# terminal's max-bars setting with (-2 Invalid params), so we start modest
+# (plenty for the recent UG window + MA89 warmup) and HALVE on failure.
+DEFAULT_BARS = {"M5": 30_000, "M15": 20_000, "M30": 15_000,
+                "H1": 10_000, "H4": 5_000}
+MIN_BARS = 2_000
+
+
+def _fetch_with_fallback(symbol: str, tf: str, n: int):
+    """bars(n); on 'Invalid params'/empty, retry halving n down to MIN_BARS."""
+    while n >= MIN_BARS:
+        try:
+            return mt5_feed.bars(symbol, tf, n=n)
+        except Exception as e:
+            if "Invalid params" in str(e) or "no rates" in str(e):
+                n //= 2
+                print(f"    {tf}: retry with n={n} ({e})")
+                continue
+            raise
+    raise RuntimeError(f"{tf}: could not fetch even {MIN_BARS} bars")
 
 
 def main() -> int:
@@ -44,9 +61,9 @@ def main() -> int:
     print(f"Exporting {args.symbol_mt5} → {out_dir} (tfs: {', '.join(args.tfs)})\n")
 
     for tf in args.tfs:
-        n = args.bars or DEFAULT_BARS.get(tf, 100_000)
+        n = args.bars or DEFAULT_BARS.get(tf, 10_000)
         try:
-            df = mt5_feed.bars(args.symbol_mt5, tf, n=n)
+            df = _fetch_with_fallback(args.symbol_mt5, tf, n)
         except Exception as e:
             print(f"  {tf}: ERROR {e}")
             continue
