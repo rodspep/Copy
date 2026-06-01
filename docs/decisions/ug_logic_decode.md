@@ -81,7 +81,34 @@ entry-anchor); treat the residual as quantified hidden logic rather than claimin
   −6.4..−3.0), short +4.4 (IQR +2.8..+7.0). NOT anchored to SMA34. The ~3–7 offset
   still varies (candidate: ATR/volatility-scaled) — to refine.
 
+## Direction is NOT fully explainable from visible/computable features (n=52)
+Decision-tree, 5-fold CV on 52 unique signals (features RECOMPUTED from MT5, i.e.
+reproducible live):
+- SMA stack only: CV **69%±14%**
+- + stated Elliott/SMC cues: **69%** (no lift → the Elliott/SMC narrative is
+  post-hoc decoration, not a direction trigger)
+- + price-action (RSI, Bollinger): train 88% but CV **69%** (overfit; no real lift)
+- baseline always-short = 58%
+**Conclusion: ~69% is the out-of-sample ceiling for DIRECTION from everything UG
+shows + everything we can compute. ~31% is irreducible-from-visible** — likely an
+opaque AI call or finer (tick/M1) price action, OR just sample-size noise (only
+~1 week of data). Do NOT claim 100% direction logic.
+
+## What IS reproducible (the decoded, deterministic/mechanical core)
+- **Indicators:** SMA34/SMA89 on M5/M15/M30/H1 (feed matches Exness MT5 ~0.25px).
+- **Entry:** LIMIT ~**1×ATR(M5)** from current price, in the fade direction
+  (median 0.90 ATR).
+- **Geometry:** SL = entry_B ∓10; TP = fixed pip template per method; range width
+  fixed per method. (100%.)
+- **Direction:** ~69% predictable — the one genuinely uncertain piece.
+
 ## Next steps
+- **Biggest lever: MORE DATA.** The export was ~1 week (52 unique). A longer
+  history / live capture would tighten the CV and may lift the direction ceiling.
+- **Reproduction backtest:** build a UG-clone from the solid parts (SMA regime +
+  ~1×ATR fade limit + fixed geometry), backtest on MT5, compare WR to UG's claimed
+  numbers (TP1 95% scalp). Tests whether the reproducible mechanics alone perform
+  like UG — if so, the hidden 31% may not matter for profitability.
 - Dedup + rule-fit script (formalize the hybrid rule as a tiny decision model).
 - Run `scripts/analyze_ug.py --signals data/ug/signals.jsonl --tv|--parquet ...`
   once OHLC is available → verify MA feed + add the indicator/structure context
