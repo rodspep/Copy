@@ -130,6 +130,24 @@ opaque AI call or finer (tick/M1) price action, OR just sample-size noise (only
   ever), marketing, or driven by a level-selection edge that is not in the signal
   text. Going from ~67% to 95% via direction alone is implausible for a 0.5R TP.
 
+## THE EDGE FOUND: S/R fade + rejection-candle CONFIRMATION
+A real winning UG trade (user, 2026-06-01) revealed the true mechanic: the Entry
+is a ZONE; you WAIT for price to pull back into it and **confirm**, then enter,
+and TP1 is measured FROM your actual entry (not a fixed level). Modelling that as
+"fade at a swing level only after a rejection close" (wick into the level, close
+back across it) flips both methods from breakeven to clearly +EV (30k M5 bars,
+conservative ties, non-overlapping):
+- scalp (TP=5/SL=10, RR0.5): no-confirm WR 62% (−0.07R) → **confirm WR 80% (+0.21R)**
+- PRI-GOLD (TP=15/SL=10, RR1.5): no-confirm 41% (+0.01R) → **confirm 55% (+0.37R)**
+Adding an H1-trend filter on top does NOT help → the **rejection confirmation is
+the edge**, not the regime. This matches UG's high claimed WR far better and is
+exactly the user's discretionary "wait for the chart to confirm" step.
+
+CAVEATS (before trusting): in-sample only; entry assumed at the level after a
+confirmation known at bar close (slightly optimistic — realistic fill ≈ next-bar
+open); no spread/slippage/commission (matters for a 5-price TP on XAU). Needs
+walk-forward + realistic fills + costs via the repo's backtest engine.
+
 ## BOTTOM LINE (with current data, n=52 / 1 week)
 Fully decoded & reproducible: SMA34/89 multi-TF inputs (feed≈Exness), entry LOCATION
 (at S/R, ~0.5×ATR from swings), deterministic SL/TP/range geometry, fixed pip

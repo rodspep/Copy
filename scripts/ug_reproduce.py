@@ -98,7 +98,8 @@ def simulate(df: pd.DataFrame, k_atr: float, tie: str = "sl") -> dict:
     return out
 
 
-def simulate_sr(df: pd.DataFrame, tie: str = "sl") -> dict:
+def simulate_sr(df: pd.DataFrame, tie: str = "sl", tp_price: float = TP1_PRICE,
+                regime: np.ndarray | None = None, confirm: bool = False) -> dict:
     """Fade AT a swing level (S/R): SHORT when price retests the last confirmed
     swing HIGH (resistance), LONG when it retests the last confirmed swing LOW
     (support). Entry = the level; SL = level ∓10; TP1 = level ±5. A 'retest' is a
@@ -116,13 +117,23 @@ def simulate_sr(df: pd.DataFrame, tie: str = "sl") -> dict:
     while i < n - 1:
         short = (not np.isnan(R[i]) and close[i - 1] < R[i] <= high[i])   # tag resistance from below
         long_ = (not np.isnan(S[i]) and close[i - 1] > S[i] >= low[i])    # tag support from above
+        if confirm:                                  # require a REJECTION close at the level
+            short = short and close[i] < R[i]        # wicked up into R but closed back below
+            long_ = long_ and close[i] > S[i]        # wicked down into S but closed back above
+        if regime is not None:                       # trade pullbacks WITH the HTF trend
+            if regime[i] > 0:
+                short = False                        # uptrend → only buy dips
+            elif regime[i] < 0:
+                long_ = False                        # downtrend → only sell rallies
+            else:
+                short = long_ = False
         if not (short or long_):
             i += 1
             continue
         if short:
-            entry = R[i]; sl, tp = entry + SL_PRICE, entry - TP1_PRICE
+            entry = R[i]; sl, tp = entry + SL_PRICE, entry - tp_price
         else:
-            entry = S[i]; sl, tp = entry - SL_PRICE, entry + TP1_PRICE
+            entry = S[i]; sl, tp = entry - SL_PRICE, entry + tp_price
         out["signals"] += 1
         res, end = None, min(i + 1 + RES_BARS, n)
         for j in range(i + 1, end):
@@ -161,19 +172,31 @@ def main() -> int:
             lbl = "consv" if tie == "sl" else "optim"
             print(f"{k:>6.1f} {lbl:>5} {r['filled']:>7} {r['tp1']:>6} "
                   f"{r['sl']:>5} {tp1_rate:>8.0%} {expR:>+15.3f}")
-    print("\n-- Entry = fade AT swing level (S/R), TP1=5/SL=10 --")
-    print(f"{'mode':>6} {'signals':>8} {'TP1':>6} {'SL':>5} {'timeout':>8} "
-          f"{'TP1-rate':>9} {'expR':>8}")
-    for tie in ("sl", "tp1"):
-        r = simulate_sr(df, tie=tie)
-        resolved = r["tp1"] + r["sl"]
-        rate = r["tp1"] / resolved if resolved else 0
-        expR = (r["tp1"] * 0.5 - r["sl"]) / resolved if resolved else 0
-        print(f"{'consv' if tie=='sl' else 'optim':>6} {r['signals']:>8} {r['tp1']:>6} "
-              f"{r['sl']:>5} {r['timeout']:>8} {rate:>8.0%} {expR:>+8.3f}")
+    # HTF (H1) regime aligned to M5, no lookahead (use H1 close time = bar+1h).
+    h1 = load_tv_csv("data/xau/XAUUSD_H1.csv").sort_values("timestamp").reset_index(drop=True)
+    h1["reg"] = np.sign(h1["close"].rolling(34).mean() - h1["close"].rolling(89).mean())
+    h1["close_time"] = h1["timestamp"] + pd.Timedelta(hours=1)
+    m5s = df.sort_values("timestamp").reset_index(drop=True)
+    merged = pd.merge_asof(m5s[["timestamp"]], h1[["close_time", "reg"]].dropna(),
+                           left_on="timestamp", right_on="close_time", direction="backward")
+    regime = merged["reg"].to_numpy()
 
-    print("\nUG claims TP1 ~95% (scalp). Compare ATR-fade vs S/R-fade TP1-rate. "
-          "True rate between consv/optim ties. Non-overlapping samples.")
+    print("\n-- Entry = pull-back to swing level (S/R); TP measured FROM entry --")
+    print(f"{'method':>14} {'filter':>10} {'sig':>5} {'WR':>5} {'breakeven':>9} {'expR':>8}")
+    for label, tp in [("scalp TP=5", 5.0), ("PRI-GOLD TP=15", 15.0)]:
+        rr = tp / SL_PRICE
+        be = 1.0 / (1.0 + rr)
+        for fname, kw in [("none", {}), ("H1-trend", {"regime": regime}),
+                          ("confirm", {"confirm": True}),
+                          ("confirm+H1", {"confirm": True, "regime": regime})]:
+            r = simulate_sr(df, tie="sl", tp_price=tp, **kw)         # conservative
+            resolved = r["tp1"] + r["sl"]
+            wr = r["tp1"] / resolved if resolved else 0
+            expR = (r["tp1"] * rr - r["sl"]) / resolved if resolved else 0
+            print(f"{label:>14} {fname:>10} {r['signals']:>5} {wr:>4.0%} "
+                  f"{be:>8.0%} {expR:>+8.3f}")
+    print("\n(conservative ties. confirm = rejection close at the level; H1-trend "
+          "= pullback with HTF trend. expR in R per resolved trade.)")
     return 0
 
 
