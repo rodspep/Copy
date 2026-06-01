@@ -102,6 +102,22 @@ opaque AI call or finer (tick/M1) price action, OR just sample-size noise (only
   fixed per method. (100%.)
 - **Direction:** ~69% predictable — the one genuinely uncertain piece.
 
+## Reproduction backtest (corrected) + S/R entry + timing
+- **Crude clone is ~breakeven, NOT UG's edge.** A fade scalp (direction = fade vs
+  M5 SMA34, entry = limit ~1×ATR from price, TP1=5/SL=10) on 30k M5 bars: after
+  fixing a fill-bar lookahead (Codex — don't score TP/SL on the fill bar itself),
+  TP1-before-SL is only **~67–71%**, expectancy **~0..+0.07R**. So geometry +
+  naive direction does NOT reproduce UG → **direction/entry-quality is the edge.**
+- **Entry IS anchored to S/R (swing highs/lows) — confirmed.** UG scalp entries sit
+  median **0.51×ATR** from the nearest M5/M30/H1 swing (72% within 1 ATR) vs a
+  random-bar **baseline of 1.13×ATR** (44%). Significantly closer → the entry is a
+  fade AT a real level, not a fixed offset. (Wide/PRI-GOLD weaker: 1.12 ATR.)
+- **Detect→post delay is empirically small here.** Using UG's stated MA as a clock
+  (find the bar whose recomputed SMA best matches), the message-ts bar is the best
+  match 98% of the time (median delay 0 min; one outlier 40 min). UG admits late
+  posts ("Telegram post chậm") but it doesn't materially confound this sample. The
+  ~0.3/MA residual is feed/computation micro-difference, not latency.
+
 ## Next steps
 - **Biggest lever: MORE DATA.** The export was ~1 week (52 unique). A longer
   history / live capture would tighten the CV and may lift the direction ceiling.
