@@ -14,6 +14,9 @@ for /f "usebackq delims=" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass
 if not defined SID ( echo [fetch] ERROR: need exactly one interactive MT5 terminal -- abort. & exit /b 1 )
 echo [fetch] MT5 session = %SID% -- exporting history (see logs\fetch.log)...
 
-"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -i %SID% -w "%BOTDIR%" cmd /c "set PYTHONUNBUFFERED=yes && ""%BOTDIR%\.venv\Scripts\python.exe"" -X utf8 -m scripts.fetch_mt5_history --tfs M5 M30 H1 > ""%BOTDIR%\logs\fetch.log"" 2>&1"
+REM Call run_fetch.bat (not python.exe inline) — same proven pattern as
+REM restart_bot.bat. Inlining python.exe inside the nested cmd /c broke the
+REM quoting and python tried to parse python.exe as a script.
+"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -i %SID% cmd /c "cd /d ""%BOTDIR%"" && call ""%BOTDIR%\run_fetch.bat"" > ""%BOTDIR%\logs\fetch.log"" 2>&1"
 echo [fetch] finished (PsExec exit %errorlevel%).
 endlocal
