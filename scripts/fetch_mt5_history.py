@@ -27,7 +27,7 @@ from src.data import mt5_feed
 # Request size per TF. MT5 copy_rates_from_pos rejects counts above the
 # terminal's max-bars setting with (-2 Invalid params), so we start modest
 # (plenty for the recent UG window + MA89 warmup) and HALVE on failure.
-DEFAULT_BARS = {"M5": 30_000, "M15": 20_000, "M30": 15_000,
+DEFAULT_BARS = {"M1": 50_000, "M5": 30_000, "M15": 20_000, "M30": 15_000,
                 "H1": 10_000, "H4": 5_000}
 MIN_BARS = 2_000
 
