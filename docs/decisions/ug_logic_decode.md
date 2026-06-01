@@ -148,6 +148,28 @@ confirmation known at bar close (slightly optimistic — realistic fill ≈ next
 open); no spread/slippage/commission (matters for a 5-price TP on XAU). Needs
 walk-forward + realistic fills + costs via the repo's backtest engine.
 
+## Realistic-cost backtest (repo engine) — the edge is FILL-SENSITIVE
+Strategy `XauUgSrReversion` (S/R reversion + rejection confirm) through the parity
+engine (MARKET fill at next-bar open + spread 2pip + slippage 1pip, risk 0.5%):
+- scalp tp=5: confirm WR 73%, meanR **−0.017** (net −$1026) — costs eat it.
+- PRI-GOLD tp=15: confirm WR 48%, meanR **−0.006** (net −$353) — ~breakeven.
+Confirm still helps (scalp meanR −0.095→−0.017), but tight-TP + 2pip spread +
+market fill ≈ breakeven-to-negative.
+
+**Crux = fill model.** UG posts an entry ZONE so you place a LIMIT at the level;
+the engine models a MARKET order at next-bar open (a worse price — fatal for a
+reversion). Re-pricing the LIMIT version with the same costs:
+- PRI-GOLD confirm: 0.55×(1.5−0.04) − 0.45×1.04 = **+0.34R**
+- scalp confirm:    0.80×(0.46) − 0.20×1.04   = **+0.16R**
+So LIMIT-at-level + confirm + costs is +EV; MARKET-next-open is not. The edge
+lives entirely in entry quality.
+
+**Real tension:** you cannot both (a) get filled at the level (touched mid-bar)
+and (b) wait for the M5 close to confirm the rejection — on the same M5 bar. The
+user does it by watching INTRABAR. A mechanical bot needs M1/tick to place the
+limit AND confirm the reversal at finer granularity. Next step to make it a real
+bot: fetch M1 and model limit-at-level + M1 rejection confirmation.
+
 ## BOTTOM LINE (with current data, n=52 / 1 week)
 Fully decoded & reproducible: SMA34/89 multi-TF inputs (feed≈Exness), entry LOCATION
 (at S/R, ~0.5×ATR from swings), deterministic SL/TP/range geometry, fixed pip

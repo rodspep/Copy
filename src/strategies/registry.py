@@ -22,6 +22,7 @@ from src.strategies.xau.htf_trend_reversal import XauHtfTrendReversal
 from src.strategies.xau.ltf_ob_entry import XauLtfObEntry, XauM15ObEntry
 from src.strategies.xau.reaction_level import XauReactionLevel
 from src.strategies.xau.ug_methods import XauScalpFade, XauDeepPullback
+from src.strategies.xau.ug_sr_reversion import XauUgSrReversion
 from src.strategies.xau.ob_fvg_trend import XauObFvgTrend
 from src.strategies.xau.trend_follow import XauTrendFollow
 from src.strategies.btc.trend_following import BtcTrendFollowing
@@ -165,6 +166,19 @@ REGISTRY: dict[tuple[str, str], dict] = {
             "sl_buffer_atr":    {"type": "float", "low": 0.2, "high": 1.0},
             "tp_rr":            {"type": "float", "low": 1.0, "high": 3.0},
             "min_sl_atr":       {"type": "float", "low": 0.3, "high": 1.0},
+        },
+    },
+
+    ("XAUUSD", "ug_sr_reversion"): {   # UG-decoded: S/R reversion + rejection confirm
+        # NOTE: edge is fill-sensitive — +EV with LIMIT entry at the level, ~breakeven
+        # under the engine's MARKET next-bar-open model. See docs/decisions/ug_logic_decode.md.
+        "strategy_cls": XauUgSrReversion,
+        "param_space": {
+            "swing_left":      {"type": "int",   "low": 3,   "high": 8},
+            "swing_right":     {"type": "int",   "low": 3,   "high": 8},
+            "sl_price":        {"type": "float", "low": 6.0,  "high": 15.0},
+            "tp_price":        {"type": "float", "low": 3.0,  "high": 20.0},
+            "require_confirm": {"type": "categorical", "choices": [True, False]},
         },
     },
 
