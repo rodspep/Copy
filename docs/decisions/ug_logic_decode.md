@@ -193,6 +193,24 @@ Recommended pivot for the user's own bot: optimise/validate the repo's existing
 edges (e.g. `ob_fvg_trend`, marked positive over 3/4 yrs) on this fresh MT5 data
 via walk-forward, rather than copying UG.
 
+## PIVOT RESULTS — validating real edges on fresh Exness data (scripts/{screen_edges,walkforward_obfvg}.py)
+1. **Screen (all XAU strategies, default params, costs):** only `ob_fvg_trend`
+   (H1) is clearly +EV (+0.33R w/short, +0.665 long-only); `smc_confluence` (M5)
+   marginally + (+0.05R); everything else negative — M5 tight-TP scalps lose to
+   the 2pip spread (same lesson as the UG decode).
+2. **Walk-forward (ob_fvg_trend H1, train180/test90):** 4/4 OOS folds positive
+   (+0.97/+0.60/+1.22/+0.59), 51 trades, **meanR +0.86R OOS**, train≈test → not
+   overfit. Robust, deployable. (This is the live bot's strategy.)
+3. **UG confirm insight applied:** the rejection-confirm fade is +EV only with a
+   WIDE RR — M5 confirm-fade at RR3 (tp=30/sl=10): WR 32%, meanR +0.034R, +$881;
+   at tight RR1.5 it's breakeven; on M30/H1 the fade is negative (trend dominates).
+
+**Unified lesson:** on XAU with 2pip spread, **wide-RR (let winners run) beats
+tight-TP scalping**. UG's headline edge (tight-TP scalp, "TP1 95%") is exactly the
+spread trap; the durable edge is wide-RR trend (ob_fvg_trend, RR≈3, H1/M30). Keep
+the live bot; the UG decode's lasting value is confirming what NOT to do (tight-TP
+scalp) and the rejection-confirm filter (minor, wide-RR only).
+
 ## BOTTOM LINE (with current data, n=52 / 1 week)
 Fully decoded & reproducible: SMA34/89 multi-TF inputs (feed≈Exness), entry LOCATION
 (at S/R, ~0.5×ATR from swings), deterministic SL/TP/range geometry, fixed pip
