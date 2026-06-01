@@ -41,6 +41,27 @@ needed to VERIFY those inputs are reproducible.
 These are UG's *claimed* win-rates — use them as ground-truth checks when we
 backtest the reconstructed rule.
 
+## Signal geometry is DETERMINISTIC (verified 93/93) — only entry varies
+Per the channel and confirmed in data: **SL and TP are fixed per method; only the
+entry price changes.** Exactly:
+- **SL = entry_B ∓ 10.0 price (100 pip)** where entry_B is the 2nd number of the
+  "Entry: A - B" range. `sl − entry_B = −10` for 40/40 longs, `+10` for 53/53
+  shorts. Zero exceptions.
+- **TP = fixed pip template per method** ({50,100,150,200} scalp / {150,200,300,400}
+  / {100,200,300}).
+- **Entry-range width fixed per method**: 3 price (scalp) or 10 price (wide).
+- Range orientation encodes direction: long written high→low, short low→high.
+So once (method, direction, entry-anchor) are known, SL/TP/range follow by formula.
+**The only free variable to reverse-engineer is the entry-anchor price** (+ method
+selection + direction).
+
+## Caveat: hidden features
+The displayed analysis (MA34/89, Elliott, SMC, risk) may be NECESSARY-not-sufficient
+or partly cosmetic — the true entry/direction/method choice may use hidden inputs.
+Plan: with OHLC, MEASURE how much the visible features explain (method, direction,
+entry-anchor); treat the residual as quantified hidden logic rather than claiming
+100% from text. The geometry above is the part that IS 100% deterministic.
+
 ## Open questions (need next)
 - Exact ENTRY construction (the range vs current price / MA34 offset).
 - What selects the TP template precisely (ATR/volatility? Elliott? risk score?).
