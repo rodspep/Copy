@@ -70,6 +70,17 @@ entry-anchor); treat the residual as quantified hidden logic rather than claimin
   `tv_loader`, or MT5/Exness): EMA vs SMA? which feed? If we can reproduce UG's
   stated MA values, we can recompute its inputs live and replicate the rule.
 
+## Verified against MT5 OHLC (data/xau/XAUUSD_{M5,M30,H1}.csv)
+- **UG uses SMA34/SMA89, NOT EMA.** Recomputed-vs-stated median |err|: M5 SMA
+  0.25–0.31 (EMA 1.5–1.8), H1 SMA89 0.29 (EMA 8.75). SMA wins on every TF.
+- **Feed matches Exness MT5 closely** (M5 |err| ~0.25 price) → we can reproduce
+  UG's MA inputs from MT5 data, hence reproduce its decision inputs. (M30/H1 SMA34
+  residual ~1–1.6 — likely a one-bar/forming-bar or micro-feed offset; refine.)
+- **Entry = LIMIT order placed ~3–7 price from CURRENT price, in the fade
+  direction** (long below, short above): long entry−close median −4.8 (IQR
+  −6.4..−3.0), short +4.4 (IQR +2.8..+7.0). NOT anchored to SMA34. The ~3–7 offset
+  still varies (candidate: ATR/volatility-scaled) — to refine.
+
 ## Next steps
 - Dedup + rule-fit script (formalize the hybrid rule as a tiny decision model).
 - Run `scripts/analyze_ug.py --signals data/ug/signals.jsonl --tv|--parquet ...`
