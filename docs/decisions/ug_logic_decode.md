@@ -118,6 +118,27 @@ opaque AI call or finer (tick/M1) price action, OR just sample-size noise (only
   posts ("Telegram post chậm") but it doesn't materially confound this sample. The
   ~0.3/MA residual is feed/computation micro-difference, not latency.
 
+## S/R-fade reproduction + honest bottom line
+- Fading every swing-level retest (SHORT at last swing high, LONG at last swing
+  low; TP1=5/SL=10) is **TP1 62–64%, expectancy NEGATIVE (−0.04..−0.07R)** — even
+  worse than the ATR-fade. So entering AT S/R spatially is real, but **fading
+  levels indiscriminately loses**: the edge is in SELECTING which level to fade
+  (regime/direction filter), i.e. the opaque AI call we can't recover from outputs.
+- **Both mechanical clones (ATR-fade, S/R-fade) are ~breakeven; neither nears the
+  claimed TP1 95%.** A genuine tight-TP fade scalp is ~62–71% TP1 on 0.5R:1R
+  payoff. UG's 95% is therefore either measured generously (e.g. TP1 touched
+  ever), marketing, or driven by a level-selection edge that is not in the signal
+  text. Going from ~67% to 95% via direction alone is implausible for a 0.5R TP.
+
+## BOTTOM LINE (with current data, n=52 / 1 week)
+Fully decoded & reproducible: SMA34/89 multi-TF inputs (feed≈Exness), entry LOCATION
+(at S/R, ~0.5×ATR from swings), deterministic SL/TP/range geometry, fixed pip
+templates per method. NOT recoverable from outputs: the level-SELECTION / direction
+decision (~31% of direction unexplained; both naive clones breakeven) — almost
+certainly the bot's opaque "AI" call. The fastest path to the exact remaining logic
+is the bot's source/spec (it is reportedly Claude-built), not further black-box
+inference.
+
 ## Next steps
 - **Biggest lever: MORE DATA.** The export was ~1 week (52 unique). A longer
   history / live capture would tighten the CV and may lift the direction ceiling.

@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from src.data.tv_loader import load_tv_csv
-from src.indicators import atr
+from src.indicators import atr, swings
 
 SL_PRICE = 10.0          # UG fixed SL (100 pip)
 TP1_PRICE = 5.0          # UG scalp TP1 (50 pip)
@@ -98,6 +98,54 @@ def simulate(df: pd.DataFrame, k_atr: float, tie: str = "sl") -> dict:
     return out
 
 
+def simulate_sr(df: pd.DataFrame, tie: str = "sl") -> dict:
+    """Fade AT a swing level (S/R): SHORT when price retests the last confirmed
+    swing HIGH (resistance), LONG when it retests the last confirmed swing LOW
+    (support). Entry = the level; SL = level ∓10; TP1 = level ±5. A 'retest' is a
+    fresh tag: prior close on the near side, this bar's range reaches the level
+    (so we don't fire every bar once price is beyond an old level). Resolve from
+    the bar AFTER the tag (no fill-bar lookahead). Non-overlapping."""
+    df = df.sort_values("timestamp").reset_index(drop=True)
+    high, low, close = (df[c].to_numpy() for c in ("high", "low", "close"))
+    sw = swings(df, left=5, right=5)
+    R = sw["swing_high_price"].to_numpy()      # carried last confirmed swing high
+    S = sw["swing_low_price"].to_numpy()       # carried last confirmed swing low
+    n = len(df)
+    out = {"signals": 0, "tp1": 0, "sl": 0, "timeout": 0}
+    i = 100
+    while i < n - 1:
+        short = (not np.isnan(R[i]) and close[i - 1] < R[i] <= high[i])   # tag resistance from below
+        long_ = (not np.isnan(S[i]) and close[i - 1] > S[i] >= low[i])    # tag support from above
+        if not (short or long_):
+            i += 1
+            continue
+        if short:
+            entry = R[i]; sl, tp = entry + SL_PRICE, entry - TP1_PRICE
+        else:
+            entry = S[i]; sl, tp = entry - SL_PRICE, entry + TP1_PRICE
+        out["signals"] += 1
+        res, end = None, min(i + 1 + RES_BARS, n)
+        for j in range(i + 1, end):
+            hit_sl = high[j] >= sl if short else low[j] <= sl
+            hit_tp = low[j] <= tp if short else high[j] >= tp
+            if hit_sl and hit_tp:
+                res = tie
+            elif hit_sl:
+                res = "sl"
+            elif hit_tp:
+                res = "tp1"
+            if res:
+                end = j
+                break
+        if res is None:
+            out["timeout"] += 1
+            i = end
+        else:
+            out[res] += 1
+            i = end + 1
+    return out
+
+
 def main() -> int:
     df = load_tv_csv("data/xau/XAUUSD_M5.csv")
     span = f"{df['timestamp'].min().date()} → {df['timestamp'].max().date()}"
@@ -113,8 +161,19 @@ def main() -> int:
             lbl = "consv" if tie == "sl" else "optim"
             print(f"{k:>6.1f} {lbl:>5} {r['filled']:>7} {r['tp1']:>6} "
                   f"{r['sl']:>5} {tp1_rate:>8.0%} {expR:>+15.3f}")
-    print("\nUG claims TP1 ~95% (scalp). True rate lies between consv (SL-first "
-          "ties) and optim (TP-first ties). Non-overlapping samples.")
+    print("\n-- Entry = fade AT swing level (S/R), TP1=5/SL=10 --")
+    print(f"{'mode':>6} {'signals':>8} {'TP1':>6} {'SL':>5} {'timeout':>8} "
+          f"{'TP1-rate':>9} {'expR':>8}")
+    for tie in ("sl", "tp1"):
+        r = simulate_sr(df, tie=tie)
+        resolved = r["tp1"] + r["sl"]
+        rate = r["tp1"] / resolved if resolved else 0
+        expR = (r["tp1"] * 0.5 - r["sl"]) / resolved if resolved else 0
+        print(f"{'consv' if tie=='sl' else 'optim':>6} {r['signals']:>8} {r['tp1']:>6} "
+              f"{r['sl']:>5} {r['timeout']:>8} {rate:>8.0%} {expR:>+8.3f}")
+
+    print("\nUG claims TP1 ~95% (scalp). Compare ATR-fade vs S/R-fade TP1-rate. "
+          "True rate between consv/optim ties. Non-overlapping samples.")
     return 0
 
 
