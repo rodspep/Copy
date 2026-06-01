@@ -170,6 +170,29 @@ user does it by watching INTRABAR. A mechanical bot needs M1/tick to place the
 limit AND confirm the reversal at finer granularity. Next step to make it a real
 bot: fetch M1 and model limit-at-level + M1 rejection confirmation.
 
+## M1 (most realistic) verdict — mechanical copy is ~breakeven
+Modelling the actual UG mechanic on M1 (limit/confirm AT the level + spread/slippage
+cost 0.4/trade, conservative SL-first, resolve on M1 bars):
+- scalp confirm: WR 69% (breakeven 67%), expR **−0.012R**
+- PRI-GOLD confirm: WR 39% (breakeven 40%), expR **−0.059R**
+M1 WR is LOWER than M5 (scalp 69% vs 80%) because coarse M5 bars HID intrabar SL
+touches — the earlier M5 +0.21/+0.37R was optimistic; M1 is honest. Across every
+faithful model (M5-market, M5-limit, M1-limit+confirm+cost) the decoded UG core
+lands at ~breakeven once fills/costs/intrabar risk are modelled.
+
+## FINAL VERDICT
+A faithful MECHANICAL copy of UG is NOT a deployable edge after costs (~breakeven).
+The pieces are fully decoded (SMA inputs, S/R entry, deterministic geometry,
+rejection confirm), and the confirm filter is genuinely +~0.04–0.08R, but it does
+not overcome XAU spread on these tight TPs. UG's apparent profitability therefore
+comes from one or more of: (a) discretionary entry timing the user adds, (b) an
+opaque level-SELECTION the signals don't reveal (the "AI"), (c) tighter real
+broker costs, or (d) marketing / variance over a 1-week sample. Building a blind
+mechanical clone would lose to costs.
+Recommended pivot for the user's own bot: optimise/validate the repo's existing
+edges (e.g. `ob_fvg_trend`, marked positive over 3/4 yrs) on this fresh MT5 data
+via walk-forward, rather than copying UG.
+
 ## BOTTOM LINE (with current data, n=52 / 1 week)
 Fully decoded & reproducible: SMA34/89 multi-TF inputs (feed≈Exness), entry LOCATION
 (at S/R, ~0.5×ATR from swings), deterministic SL/TP/range geometry, fixed pip
