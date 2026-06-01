@@ -32,6 +32,15 @@ needed to VERIFY those inputs are reproducible.
    91%** of unique signals. The exceptions' stacks are strongly aligned, i.e.
    genuine trend-continuation, not noise.
 
+## UG's own description of the two families (from channel admin posts)
+- **Phương Pháp 2 / Scalp Signal** (template `{50,100,150,200}`): "đớp 5 giá là
+  chuẩn; vào muộn gần cạnh trên thì gồng 10-15 giá tới TP1." Claimed hit-rate:
+  **TP1 ~95%**, TP2 60%, TP3 40%.
+- **PRI GOLD SLCAP NOMAL** (template `{150,200,300,400}`): "thường ăn 10-20 giá
+  (~85%); 30-60 giá (65%); chốt 50% ở target đầu, để 50%."
+These are UG's *claimed* win-rates — use them as ground-truth checks when we
+backtest the reconstructed rule.
+
 ## Open questions (need next)
 - Exact ENTRY construction (the range vs current price / MA34 offset).
 - What selects the TP template precisely (ATR/volatility? Elliott? risk score?).
