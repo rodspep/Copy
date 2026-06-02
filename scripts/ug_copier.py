@@ -146,6 +146,8 @@ def main() -> int:
     st = _load_state()
     trade_db.init_db()
     now_iso = lambda: pd.Timestamp.now(tz="UTC").isoformat()
+    notify.send(f"📥 <b>UG Copier khởi động</b> — {mode} · {args.symbol} · vol "
+                f"{args.volume} · lọc TP1∈{{50,100,150}} · đang theo dõi UG.")
 
     while True:
         try:
