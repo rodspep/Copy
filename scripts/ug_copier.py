@@ -104,9 +104,16 @@ def main() -> int:
                 k = _key(sig)
                 if k in st["done"]:
                     continue
+                # End-to-end latency: signal's Telegram time → now (covers
+                # telegram→listener→file→this poll). Logged so we can see if the
+                # copier is too slow vs how fast UG's price moves.
+                try:
+                    lag = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(sig["ts"])).total_seconds()
+                except Exception:
+                    lag = -1.0
                 d = decide(sig, mid, volume=args.volume)
                 if d.action == "skip":
-                    print(f"  [{now_iso()}] SKIP {sig.get('direction')} — {d.reason}")
+                    print(f"  [{now_iso()}] (lag {lag:.1f}s) SKIP {sig.get('direction')} — {d.reason}")
                     st["done"][k] = {"skipped": d.reason, "at": now_iso()}
                 elif (exp := broker.open_exposure(args.symbol)) is None:
                     print(f"  [{now_iso()}] HOLD {sig.get('direction')} — exposure unknown "
@@ -130,7 +137,8 @@ def main() -> int:
                                          "order": o.__dict__}   # not retried (safety)
                         _save_state(st)
                         continue
-                    print(f"  [{now_iso()}] PLACED {o.order_type} {args.symbol} {o.volume} "
+                    print(f"  [{now_iso()}] (lag {lag:.1f}s signal→placed) PLACED "
+                          f"{o.order_type} {args.symbol} {o.volume} "
                           f"@ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
                     st["done"][k] = {"ticket": ticket, "placed_at": now_iso(),
                                      "order": o.__dict__}
