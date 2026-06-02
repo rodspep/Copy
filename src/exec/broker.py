@@ -60,7 +60,10 @@ class Mt5Broker:
 
     def _find_pending(self, symbol: str, o: Order) -> int | None:
         """Find an already-resting pending that matches this order (for reconcile
-        after an ambiguous order_send) — same magic, type, price, volume."""
+        after an ambiguous order_send) — same magic, type, price, volume AND tp/sl.
+        TP/SL matter: the two bracket legs share magic/type/entry/volume and differ
+        ONLY by TP — without matching TP we could reconcile the TP3 leg onto the
+        already-resting TP1 ticket (duplicate row, broken lifecycle)."""
         orders = self.mt5.orders_get(symbol=symbol)
         if not orders:
             return None
@@ -71,7 +74,9 @@ class Mt5Broker:
         for x in orders:
             if (x.magic == MAGIC and x.type == want
                     and abs(x.price_open - o.entry) <= tol
-                    and abs(x.volume_current - o.volume) < 1e-9):
+                    and abs(x.volume_current - o.volume) < 1e-9
+                    and abs(x.tp - o.tp) <= tol
+                    and abs(x.sl - o.sl) <= tol):
                 return int(x.ticket)
         return None
 
@@ -140,6 +145,23 @@ class Mt5Broker:
             return None
         return sum(1 for tk in list(pend) if self.cancel(tk))
 
+    def modify_sl(self, position_id: int, new_sl: float) -> bool:
+        """Move an OPEN position's SL (e.g. to break-even), keeping its TP. True on
+        success. False if the position is gone or the broker rejects."""
+        pos = self.mt5.positions_get(ticket=int(position_id))
+        if not pos:
+            print(f"  [mt5] modify_sl: position {position_id} not found (already closed?)")
+            return False
+        p = pos[0]
+        r = self.mt5.order_send({
+            "action": self.mt5.TRADE_ACTION_SLTP, "symbol": p.symbol,
+            "position": int(position_id), "sl": float(new_sl), "tp": float(p.tp),
+        })
+        ok = r is not None and r.retcode == self.mt5.TRADE_RETCODE_DONE
+        if not ok:
+            print(f"  [mt5] modify_sl FAILED pos={position_id} retcode={getattr(r,'retcode',None)}")
+        return ok
+
     def fill_info(self, order_ticket: int):
         """Filled → {position_id, fill_price}; confirmed-not-filled → None;
         history query FAILED → "unknown" (so the caller doesn't misread a transient
@@ -200,6 +222,10 @@ class DryRunBroker(Mt5Broker):
     def cancel(self, ticket: int) -> bool:
         self._dry_open.discard(ticket)
         print(f"  [DRY] would cancel ticket {ticket}")
+        return True
+
+    def modify_sl(self, position_id: int, new_sl: float) -> bool:
+        print(f"  [DRY] would move SL of pos {position_id} -> {new_sl}")
         return True
 
     def fill_info(self, order_ticket: int) -> dict | None:

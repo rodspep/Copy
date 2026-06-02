@@ -177,11 +177,20 @@ def _method_label(pip) -> str:
     return {50.0: "PP2 scalp", 100.0: "method-100", 150.0: "PRI 150"}.get(float(pip or 0), f"TP1 {pip}")
 
 
-def _place_msg(o, sig, lag: float) -> str:
+def _place_msg(orders, sig, lag: float) -> str:
+    o = orders[0]
     arrow = "🟢 BUY" if o.side == "long" else "🔴 SELL"
+    nlegs = len(orders)
+    if nlegs > 1:
+        tps = " · ".join(f"{'TP1' if x.leg == 'tp1' else 'TP3'} {x.tp:.2f}" for x in orders)
+        plan = "2 chân TP1+TP3, SL→BE sau TP1"
+    else:
+        tps = f"TP1 {o.tp:.2f}"
+        plan = "TP1 full"
     return (f"📥 <b>COPY · {arrow} XAUUSDm</b>\n"
-            f"➡️ Entry <b>{o.entry:.2f}</b> · 🛑 SL {o.sl:.2f} · 🎯 TP1 {o.tp:.2f}\n"
-            f"📦 Vol {o.volume} · {_method_label(o.tp1_pip)} (TP1 {o.tp1_pip:g}pip)\n"
+            f"➡️ Entry <b>{o.entry:.2f}</b> · 🛑 SL {o.sl:.2f}\n"
+            f"🎯 {tps}\n"
+            f"📦 Vol {o.volume}×{nlegs} · {_method_label(o.tp1_pip)} · {plan}\n"
             f"🕐 từ UG {_vn(sig.get('ts',''))} · lag {lag:.0f}s")
 
 FEED = Path("data/ug/live_signals.jsonl")
@@ -315,35 +324,41 @@ def main() -> int:
                     print(f"  [{now_iso()}] HOLD {sig.get('direction')} — exposure unknown "
                           f"(broker query failed); not placing this cycle")
                     continue
-                elif exp >= args.max_open:
+                elif exp + len(d.orders) > args.max_open:
                     print(f"  [{now_iso()}] HOLD {sig.get('direction')} — max-open "
-                          f"{args.max_open} reached (exposure {exp}); reconsider next poll")
+                          f"{args.max_open} would be exceeded (exposure {exp} + "
+                          f"{len(d.orders)} legs); reconsider next poll")
                     continue        # don't mark done → reconsider when exposure frees
                 else:
-                    o = d.order
-                    # Pre-mark BEFORE order_send so a crash between send and save can
-                    # never double-place on restart. If we then crash, the order (if
-                    # it was sent) still carries its own SL/TP — safe, just unmanaged.
-                    st["done"][k] = {"status": "placing", "at": now_iso(), "order": o.__dict__}
+                    # Pre-mark BEFORE placing so a crash mid-place can't double-place
+                    # on restart (k stays in done). Any leg that DID land carries its
+                    # own SL/TP, so a crash leaves it safe (just possibly unmanaged).
+                    st["done"][k] = {"status": "placing", "at": now_iso()}
                     _save_state(st)
-                    ticket = broker.place_limit(args.symbol, o)
-                    if ticket is None:
-                        print(f"  [{now_iso()}] place FAILED {o.order_type} @ {o.entry}")
-                        st["done"][k] = {"status": "place_failed", "at": now_iso(),
-                                         "order": o.__dict__}   # not retried (safety)
+                    placed = []          # [(Order, ticket)] for legs that actually landed
+                    for o in d.orders:
+                        ticket = broker.place_limit(args.symbol, o)
+                        if ticket is None:
+                            print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
+                            continue       # not retried (safety); other leg may still place
+                        print(f"  [{now_iso()}] (lag {lag:.1f}s) PLACED {o.order_type} {o.leg} "
+                              f"{args.symbol} {o.volume} @ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
+                        placed.append((o, ticket))
+                    if not placed:
+                        st["done"][k] = {"status": "place_failed", "at": now_iso()}
                         _save_state(st)
                         continue
-                    print(f"  [{now_iso()}] (lag {lag:.1f}s signal→placed) PLACED "
-                          f"{o.order_type} {args.symbol} {o.volume} "
-                          f"@ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
-                    msg_id = notify.send(_place_msg(o, sig, lag))   # → Telegram, keep id
-                    tid = trade_db.insert({
-                        "signal_ts": sig.get("ts"), "direction": o.side,
-                        "method_pip": o.tp1_pip, "order_type": o.order_type,
-                        "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
-                        "ticket": ticket, "status": "pending", "tg_msg_id": msg_id,
-                        "created_at": now_iso()})
-                    st["done"][k] = {"trade_id": tid, "ticket": ticket}
+                    msg_id = notify.send(_place_msg([o for o, _ in placed], sig, lag))
+                    recs = []
+                    for o, ticket in placed:
+                        tid = trade_db.insert({
+                            "signal_ts": sig.get("ts"), "direction": o.side,
+                            "method_pip": o.tp1_pip, "order_type": o.order_type,
+                            "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
+                            "ticket": ticket, "status": "pending", "tg_msg_id": msg_id,
+                            "created_at": now_iso(), "leg": o.leg, "group_id": k})
+                        recs.append({"trade_id": tid, "ticket": ticket, "leg": o.leg})
+                    st["done"][k] = {"placed": recs}
                     _save_state(st)
 
             # 2) Lifecycle management of DB-tracked trades (pending→filled→closed),
@@ -353,20 +368,28 @@ def main() -> int:
                 print(f"  [{now_iso()}] pending query failed; skip management this cycle")
                 time.sleep(args.poll); continue
 
-            for r in trade_db.open_trades():
+            opens = trade_db.open_trades()
+            # The don't-chase trigger for a whole bracket is the SCALP target (TP1),
+            # not each leg's own TP — the tp3 runner's TP is far away. Map group→TP1.
+            group_tp1 = {r["group_id"]: r["tp"] for r in opens
+                         if r["leg"] == "tp1" and r["group_id"]}
+
+            for r in opens:
                 tid, tk = r["id"], r["ticket"]
                 long = r["direction"] == "long"
+                leg = r["leg"] or "tp1"
                 if r["status"] == "pending":
                     if tk in live_tickets:
-                        # cancel if price reached TP1 (don't chase) or order expired
-                        reached = (mid >= r["tp"]) if long else (mid <= r["tp"])
+                        # cancel if price reached the GROUP's TP1 (don't chase) or expired
+                        trig = group_tp1.get(r["group_id"], r["tp"])
+                        reached = (mid >= trig) if long else (mid <= trig)
                         age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
                         if reached or age > args.expiry_min:
                             why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
                             if broker.cancel(tk):
                                 trade_db.update(tid, status="cancelled", closed_at=now_iso(), note=why)
-                                notify.send(f"🚫 <b>Hủy lệnh chờ</b> — {why}", reply_to=r["tg_msg_id"])
-                                print(f"  [{now_iso()}] CANCEL ticket {tk} — {why}")
+                                notify.send(f"🚫 <b>Hủy {leg}</b> — {why}", reply_to=r["tg_msg_id"])
+                                print(f"  [{now_iso()}] CANCEL {leg} ticket {tk} — {why}")
                     else:
                         fi = broker.fill_info(tk)
                         if fi == "unknown":
@@ -374,28 +397,48 @@ def main() -> int:
                         if fi:
                             trade_db.update(tid, status="filled", position_id=fi["position_id"],
                                             fill_price=fi["fill_price"], filled_at=now_iso())
-                            notify.send(f"🎯 <b>Đã khớp</b> @ {fi['fill_price']:.2f}",
+                            notify.send(f"🎯 <b>Đã khớp {leg}</b> @ {fi['fill_price']:.2f}",
                                         reply_to=r["tg_msg_id"])
-                            print(f"  [{now_iso()}] FILLED ticket {tk} @ {fi['fill_price']:.2f}")
+                            print(f"  [{now_iso()}] FILLED {leg} ticket {tk} @ {fi['fill_price']:.2f}")
                         else:
                             trade_db.update(tid, status="cancelled", closed_at=now_iso(),
                                             note="pending vanished")
-                            notify.send("🚫 <b>Lệnh chờ đã biến mất</b> (hủy ngoài?)",
+                            notify.send(f"🚫 <b>Lệnh chờ {leg} đã biến mất</b> (hủy ngoài?)",
                                         reply_to=r["tg_msg_id"])
                 elif r["status"] == "filled":
                     ci = broker.closed_info(r["position_id"])
                     if ci:
                         cp, pnl = ci["close_price"], ci["profit"]
-                        # classify by which level the close sits nearest
+                        # classify by nearest level; r["sl"] reflects any BE move already saved
                         reason = ("closed_tp" if abs(cp - r["tp"]) <= abs(cp - r["sl"])
                                   else "closed_sl")
                         trade_db.update(tid, status=reason, close_price=cp, profit=pnl,
                                         closed_at=now_iso())
                         icon = "✅ WIN" if pnl > 0 else ("❌ LOSS" if pnl < 0 else "⚪ BE")
-                        hit = "TP1" if reason == "closed_tp" else "SL"
-                        notify.send(f"{icon} — chạm {hit} @ {cp:.2f}\n"
+                        if reason == "closed_tp":
+                            hit = "TP1" if leg == "tp1" else "TP3"
+                        elif abs(cp - r["entry"]) <= 0.30:        # ~spread → break-even exit
+                            hit = "hòa vốn (BE)"
+                        else:
+                            hit = "SL"
+                        notify.send(f"{icon} <b>{leg}</b> — chạm {hit} @ {cp:.2f}\n"
                                     f"💰 Lời/Lỗ: <b>{pnl:+.2f} USD</b>", reply_to=r["tg_msg_id"])
-                        print(f"  [{now_iso()}] CLOSED {hit} @ {cp:.2f} pnl {pnl:+.2f}")
+                        print(f"  [{now_iso()}] CLOSED {leg} {hit} @ {cp:.2f} pnl {pnl:+.2f}")
+
+            # 3) Break-even reconciliation: any OPEN runner (tp3) whose scalp (tp1)
+            #    sibling already WON → move the runner's SL to entry. Standing check
+            #    (re-fetches siblings fresh) so it retries until the broker accepts.
+            for r in opens:
+                if (r["leg"] == "tp3" and r["status"] == "filled"
+                        and r["position_id"] and r["group_id"]):
+                    sibs = trade_db.siblings(r["group_id"])
+                    tp1_won = any(s["leg"] == "tp1" and s["status"] == "closed_tp" for s in sibs)
+                    if tp1_won and r["sl"] is not None and abs(r["sl"] - r["entry"]) > 1e-6:
+                        if broker.modify_sl(r["position_id"], r["entry"]):
+                            trade_db.update(r["id"], sl=r["entry"], note="SL→BE sau TP1")
+                            notify.send("🛡️ <b>Runner TP3: SL dời về hòa vốn</b> (TP1 đã thắng)",
+                                        reply_to=r["tg_msg_id"])
+                            print(f"  [{now_iso()}] BE move pos {r['position_id']} -> {r['entry']}")
         except Exception as e:
             print(f"  [{now_iso()}] loop error {e}")
         time.sleep(args.poll)

@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at   TEXT,
     filled_at    TEXT,
     closed_at    TEXT,
-    note         TEXT
+    note         TEXT,
+    leg          TEXT,            -- 'tp1' (scalp) | 'tp3' (runner) — bracket leg
+    group_id     TEXT             -- shared key linking the legs of one signal
 );
 """
+
+# Columns added after the original schema shipped — ALTER existing DBs in place.
+_MIGRATIONS = (("leg", "TEXT"), ("group_id", "TEXT"))
 
 
 def _conn():
@@ -47,12 +52,17 @@ def _conn():
 def init_db() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA)
+        have = {r["name"] for r in c.execute("PRAGMA table_info(trades)")}
+        for col, typ in _MIGRATIONS:
+            if col not in have:
+                c.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
 
 
 def insert(rec: dict) -> int:
     cols = ("signal_ts", "direction", "method_pip", "order_type", "entry", "sl", "tp",
             "volume", "ticket", "position_id", "status", "fill_price", "close_price",
-            "profit", "tg_msg_id", "created_at", "filled_at", "closed_at", "note")
+            "profit", "tg_msg_id", "created_at", "filled_at", "closed_at", "note",
+            "leg", "group_id")
     vals = [rec.get(k) for k in cols]
     with _conn() as c:
         cur = c.execute(
@@ -73,6 +83,15 @@ def open_trades() -> list[sqlite3.Row]:
     with _conn() as c:
         return c.execute("SELECT * FROM trades WHERE status IN ('pending','filled') "
                          "ORDER BY id").fetchall()
+
+
+def siblings(group_id: str) -> list[sqlite3.Row]:
+    """All legs sharing a group_id (the two bracket legs of one signal)."""
+    if not group_id:
+        return []
+    with _conn() as c:
+        return c.execute("SELECT * FROM trades WHERE group_id=? ORDER BY id",
+                         (group_id,)).fetchall()
 
 
 def recent(n: int = 10) -> list[sqlite3.Row]:
