@@ -16,6 +16,7 @@ UG signal geometry (decoded — see docs/decisions/ug_logic_decode.md):
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 PIP = 0.1                       # XAU: 1 pip = 0.1 price
@@ -68,12 +69,19 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     direction = sig.get("direction")
     if direction not in ("long", "short"):
         return Decision("skip", f"bad direction {direction!r}")
+    if not isinstance(current_price, (int, float)) or not math.isfinite(current_price):
+        return Decision("skip", f"invalid current_price {current_price!r}")
+    if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
+        return Decision("skip", f"invalid volume {volume!r}")
 
-    tp1_pip = _f((sig.get("tps_pip") or {}).get(1) or (sig.get("tps_pip") or {}).get("1"))
-    if tp1_pip is None:
-        return Decision("skip", "no TP1")
-    if tp1_pip not in ALLOWED_TP1_PIP:
-        return Decision("skip", f"filtered: TP1={tp1_pip:g}pip (only {ALLOWED_TP1_PIP})")
+    tp1_raw = _f((sig.get("tps_pip") or {}).get(1) or (sig.get("tps_pip") or {}).get("1"))
+    if tp1_raw is None or not math.isfinite(tp1_raw):
+        return Decision("skip", "no/invalid TP1")
+    # Canonicalize to an allowed key with tolerance so a computed float (e.g.
+    # 150.0000001) still matches the dict/tuple keys robustly.
+    tp1_pip = min(ALLOWED_TP1_PIP, key=lambda x: abs(x - tp1_raw))
+    if abs(tp1_pip - tp1_raw) > 1e-6:
+        return Decision("skip", f"filtered: TP1={tp1_raw:g}pip (only {ALLOWED_TP1_PIP})")
     if real_mode and tp1_pip in OBSERVE_ONLY_TP1:
         return Decision("skip", f"observe-only TP1={tp1_pip:g}pip not traded on real money")
 
@@ -81,6 +89,8 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     sl = _f(sig.get("sl"))
     if lo is None or hi is None or sl is None:
         return Decision("skip", "missing entry zone / SL")
+    if not all(math.isfinite(v) for v in (lo, hi, sl)):
+        return Decision("skip", "non-finite entry zone / SL")
 
     # Entry within the zone, per the method's chosen mode.
     # UG writes the zone "near - deep": entry_low(lo)=near (entry-side),

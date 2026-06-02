@@ -21,7 +21,7 @@ import pandas as pd
 PIP = 0.1
 LOT = 0.01
 USD_PER_PRICE = 100 * LOT           # XAU: 1 lot=100oz -> $100/price; 0.01 lot -> $1/price
-MODE_BY_TP1 = {50.0: "mid", 100.0: "near", 150.0: "deep"}
+MODE_BY_TP1 = {50.0: "mid", 100.0: "mid", 150.0: "mid"}   # matches live copier (all MID)
 
 
 def load_m1() -> pd.DataFrame:
