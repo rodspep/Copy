@@ -192,7 +192,9 @@ STATE = Path("data/ug/copier_state.json")
 
 
 def _key(sig: dict) -> str:
-    return "|".join(str(sig.get(k)) for k in ("ts", "direction", "entry_low", "entry_high", "sl"))
+    # Dedup by CONTENT (not ts): UG reposts the same signal ~1 min apart with a new
+    # timestamp — those must collapse to ONE order, not one per repost.
+    return "|".join(str(sig.get(k)) for k in ("direction", "entry_low", "entry_high", "sl"))
 
 
 def _load_state() -> dict:
