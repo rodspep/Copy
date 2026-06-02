@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 
@@ -29,6 +30,8 @@ import pandas as pd
 from src.exec.ug_copier_logic import decide, should_cancel_pending, Order
 
 FEED = Path("data/ug/live_signals.jsonl")
+# State path is set per run-mode (live vs dry) so a dry-run can never poison the
+# live dedup/exposure record. Assigned in main().
 STATE = Path("data/ug/copier_state.json")
 
 
@@ -44,7 +47,11 @@ def _load_state() -> dict:
 
 def _save_state(st: dict) -> None:
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(st, ensure_ascii=False, indent=0), encoding="utf-8")
+    tmp = STATE.with_suffix(".json.tmp")        # atomic write: tmp + replace
+    tmp.write_text(json.dumps(st, ensure_ascii=False, indent=0), encoding="utf-8")
+    os.replace(tmp, STATE)
+
+
 
 
 def _read_feed() -> list[dict]:
@@ -68,8 +75,11 @@ def main() -> int:
     ap.add_argument("--volume", type=float, default=0.01)
     ap.add_argument("--poll", type=int, default=30)
     ap.add_argument("--expiry-min", type=int, default=240, help="cancel unfilled pending after N min")
+    ap.add_argument("--max-open", type=int, default=5, help="hard cap on concurrent placed orders")
     args = ap.parse_args()
 
+    global STATE
+    STATE = Path(f"data/ug/copier_state_{'live' if args.live else 'dry'}.json")
     from src.exec.broker import Mt5Broker, DryRunBroker
     broker = Mt5Broker() if args.live else DryRunBroker()
     mode = "LIVE" if args.live else "DRY-RUN"
@@ -98,6 +108,14 @@ def main() -> int:
                 if d.action == "skip":
                     print(f"  [{now_iso()}] SKIP {sig.get('direction')} — {d.reason}")
                     st["done"][k] = {"skipped": d.reason, "at": now_iso()}
+                elif (exp := broker.open_exposure(args.symbol)) is None:
+                    print(f"  [{now_iso()}] HOLD {sig.get('direction')} — exposure unknown "
+                          f"(broker query failed); not placing this cycle")
+                    continue
+                elif exp >= args.max_open:
+                    print(f"  [{now_iso()}] HOLD {sig.get('direction')} — max-open "
+                          f"{args.max_open} reached (exposure {exp}); reconsider next poll")
+                    continue        # don't mark done → reconsider when exposure frees
                 else:
                     o = d.order
                     # Pre-mark BEFORE order_send so a crash between send and save can
@@ -120,11 +138,12 @@ def main() -> int:
 
             # 2) Manage live pendings (cancel if price reached TP1 unfilled, or expired).
             live_tickets = broker.pending_tickets(args.symbol)
+            if live_tickets is None:        # query FAILED — don't mistake for 'all gone'
+                print(f"  [{now_iso()}] pending query failed; skip management this cycle")
+                time.sleep(args.poll); continue
             for k, rec in st["done"].items():
                 tk = rec.get("ticket")
                 if tk is None or rec.get("closed"):
-                    continue
-                if not args.live:                 # dry-run keeps no real pendings to manage
                     continue
                 if tk not in live_tickets:         # filled or already gone → MT5 manages SL/TP now
                     rec["closed"] = "filled_or_gone"; _save_state(st); continue
