@@ -22,9 +22,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="XAUUSDm")
     ap.add_argument("--volume", type=float, default=0.01)
+    ap.add_argument("--allow-real", action="store_true",
+                    help="permit running on a REAL account (default: demo only)")
     args = ap.parse_args()
 
     b = Mt5Broker()
+    # Safety: refuse to place a test order on a REAL account unless forced.
+    acc = b.mt5.account_info()
+    if acc is None:
+        print("FAIL: cannot read account_info"); return 1
+    is_demo = acc.trade_mode == b.mt5.ACCOUNT_TRADE_MODE_DEMO
+    print(f"account {acc.login} · {acc.server} · "
+          f"{'DEMO' if is_demo else 'REAL/CONTEST'} · balance {acc.balance}")
+    if not is_demo and not args.allow_real:
+        print("ABORT: not a DEMO account. Re-run with --allow-real to test on real money.")
+        return 2
     px = b.get_price(args.symbol)
     if not px:
         print(f"FAIL: no price for {args.symbol}")
