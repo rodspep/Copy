@@ -155,7 +155,14 @@ class Mt5Broker:
     def closed_info(self, position_id: int) -> dict | None:
         """Fully-closed position → realized profit (incl swap+commission) + last
         close price. None if still open, partially open, or no exit deal yet."""
-        deals = self._deals(position=int(position_id))
+        # NOTE: history_deals_get(from, to, position=X) IGNORES the position filter
+        # when dates are also given — it returns ALL deals in the window (incl. the
+        # account's balance/deposit deal). That made profit = account balance, not the
+        # trade's P/L. So fetch the window and filter by position_id ourselves.
+        deals = self._deals()
+        if not deals:
+            return None
+        deals = [d for d in deals if int(d.position_id) == int(position_id)]
         if not deals:
             return None
         ins = [d for d in deals if d.entry == self.mt5.DEAL_ENTRY_IN]
