@@ -76,6 +76,8 @@ def main() -> int:
     ap.add_argument("--poll", type=int, default=30)
     ap.add_argument("--expiry-min", type=int, default=240, help="cancel unfilled pending after N min")
     ap.add_argument("--max-open", type=int, default=5, help="hard cap on concurrent placed orders")
+    ap.add_argument("--allow-real", action="store_true",
+                    help="permit --live on a REAL account (default: live allowed on DEMO only)")
     args = ap.parse_args()
 
     global STATE
@@ -86,7 +88,16 @@ def main() -> int:
     print(f"UG copier {mode} · {args.symbol} · vol {args.volume} · poll {args.poll}s "
           f"· expiry {args.expiry_min}min")
     if args.live:
-        print("  !! LIVE order placement enabled !!")
+        # Safety: --live is allowed only on a DEMO account unless explicitly forced.
+        acc = broker.mt5.account_info()
+        if acc is None:
+            raise SystemExit("ABORT: cannot read account_info")
+        is_demo = acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO
+        print(f"  account {acc.login} · {acc.server} · "
+              f"{'DEMO' if is_demo else 'REAL/CONTEST'} · balance {acc.balance}")
+        if not is_demo and not args.allow_real:
+            raise SystemExit("ABORT: --live on a non-DEMO account. Pass --allow-real to trade real money.")
+        print("  !! LIVE order placement ENABLED !!")
 
     st = _load_state()
     now_iso = lambda: pd.Timestamp.now(tz="UTC").isoformat()
