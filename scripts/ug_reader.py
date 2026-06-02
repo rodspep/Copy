@@ -67,7 +67,10 @@ def _fmt_vn(dt) -> str:
 
 def cmd_auth(cfg: dict) -> int:
     with _client(cfg) as client:
-        client.start(phone=cfg.get("phone") or None)   # prompts for code / 2FA
+        # phone from config; code is always interactive; 2FA password from config
+        # if present (avoids mistypes in the hidden prompt), else prompts.
+        client.start(phone=cfg.get("phone") or None,
+                     password=cfg.get("password") or None)
         me = client.get_me()
         uname = f"@{me.username}" if me.username else ""
         print(f"✅ Logged in as {me.first_name} {uname} (id {me.id}). "
@@ -135,21 +138,37 @@ def cmd_history(cfg: dict, limit: int) -> int:
     return 0
 
 
+FEED_PATH = Path("data/ug/live_signals.jsonl")   # structured signals for the copier
+
+
 def cmd_listen(cfg: dict) -> int:
     from telethon import events
+    from scripts.parse_ug_export import parse_signal     # reuse the proven parser
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     client = _client(cfg)
     client.start(phone=cfg.get("phone") or None)
     ent = _resolve(client, cfg.get("ug_chat"))
     chat_id = getattr(ent, "id", None)
-    print(f"Listening to {cfg.get('ug_chat')} (id {chat_id}). Ctrl+C to stop.")
+    print(f"Listening to {cfg.get('ug_chat')} (id {chat_id}).")
+    print(f"  raw → {OUT_PATH}   ·   parsed signals → {FEED_PATH}")
+    print("  Ctrl+C to stop.")
 
     @client.on(events.NewMessage(chats=ent))
     async def _on(event):                      # noqa: ANN001
         r = _record(event.message)
-        with OUT_PATH.open("a", encoding="utf-8") as f:
+        with OUT_PATH.open("a", encoding="utf-8") as f:      # raw audit trail
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
-        print(f"  [{r['date_vn']}] {r['text'].replace(chr(10),' ⏎ ')[:120]}")
+        print(f"  [{r['date_vn']}] {r['text'].replace(chr(10),' ⏎ ')[:100]}")
+        try:                                                  # parse → copier feed
+            sig = parse_signal(r["date_utc"], r["text"])
+        except Exception as e:
+            print(f"    [parse error] {e}"); return
+        if sig:
+            with FEED_PATH.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(sig, ensure_ascii=False) + "\n")
+            tp1 = (sig.get("tps_pip") or {}).get(1)
+            print(f"    → SIGNAL {sig['direction']} entry {sig['entry_low']}-{sig['entry_high']} "
+                  f"sl {sig['sl']} TP1 {tp1}pip → fed to copier")
 
     client.run_until_disconnected()
     return 0
