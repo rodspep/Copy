@@ -9,6 +9,7 @@ cd /d "%BOTDIR%"
 echo [listener] launching UG listener (see logs\listener.log)...
 REM Call an inner .bat (not python.exe inline) — inline python in the nested
 REM PsExec cmd breaks the quoting (same fix as run_fetch.bat).
-"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -d cmd /c "cd /d ""%BOTDIR%"" && call ""%BOTDIR%\run_listener_inner.bat"" >> ""%BOTDIR%\logs\listener.log"" 2>&1"
+REM Redirect lives inside run_listener_inner.bat (survives -d detachment).
+"%BOTDIR%\PsExec64.exe" -accepteula -nobanner -d cmd /c "cd /d ""%BOTDIR%"" && call ""%BOTDIR%\run_listener_inner.bat"""
 echo [listener] launched (PsExec exit %errorlevel%).
 endlocal
