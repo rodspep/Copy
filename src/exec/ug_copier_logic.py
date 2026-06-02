@@ -7,9 +7,9 @@ order is ever placed.
 
 UG signal geometry (decoded — see docs/decisions/ug_logic_decode.md):
   - Entry is a ZONE "A - B"; SL is a fixed price; TP1..TP4 in pip (1 pip = 0.1 px).
-  - BEST entry = the favourable (deep) edge of the zone: lowest price for a BUY,
-    highest for a SELL → tightest risk to the fixed SL, best RR.
-  - Only take the wider methods: TP1 ∈ {100, 150} pip (skip the PP2 scalp TP1=50).
+  - Entry within the zone is chosen PER METHOD (ENTRY_MODE_BY_TP1, from the
+    ug_entry_compare backtest): TP1=50→mid, TP1=100→near, TP1=150→deep.
+  - Take TP1 ∈ {50, 100, 150} pip (PP2 scalp included for the demo data-gathering).
   - If price has ALREADY run to/past TP1, the move is done → skip (UG's own
     "nếu giá đã chạy đến TP1, KHÔNG vào").
 """
@@ -18,7 +18,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 PIP = 0.1                       # XAU: 1 pip = 0.1 price
-ALLOWED_TP1_PIP = (100.0, 150.0)
+# Methods we trade + the entry edge per method (scripts/ug_entry_compare.py, but
+# samples are SMALL — provisional, revisit after demo accrues data):
+#   TP1=50  (PP2 scalp): MID  — best net (+2.38), good fill, WR ~89%.
+#   TP1=100            : NEAR — 'near' (1st number) had the best net (+7.68) in
+#                               the tiny n=5 sample; user wants to test it on the
+#                               demo. (Note: near = worst R:R ~0.5 vs the fixed SL,
+#                               and n is small — provisional, revisit with data.)
+#   TP1=150            : DEEP — best net (−0.96, least bad), tightest risk to SL.
+# near = entry_low (1st number, entry-side); deep = entry_high (2nd, SL-side).
+ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "near", 150.0: "deep"}
+ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
 
 @dataclass(frozen=True)
@@ -60,13 +70,12 @@ def decide(sig: dict, current_price: float, volume: float = 0.01) -> Decision:
     if lo is None or hi is None or sl is None:
         return Decision("skip", "missing entry zone / SL")
 
-    # Deep (favourable) edge of the zone.
-    if direction == "long":
-        entry = min(lo, hi)
-        otype, sign = "buy_limit", 1.0
-    else:
-        entry = max(lo, hi)
-        otype, sign = "sell_limit", -1.0
+    # Entry within the zone, per the method's chosen mode.
+    # UG writes the zone "near - deep": entry_low(lo)=near (entry-side),
+    # entry_high(hi)=deep (SL-side, = the fixed-SL anchor). mid = average.
+    entry = {"near": lo, "mid": (lo + hi) / 2.0, "deep": hi}[ENTRY_MODE_BY_TP1[tp1_pip]]
+    sign = 1.0 if direction == "long" else -1.0
+    otype = "buy_limit" if direction == "long" else "sell_limit"
 
     tp = entry + sign * tp1_pip * PIP
 

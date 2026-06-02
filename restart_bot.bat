@@ -18,7 +18,10 @@ echo [restart] MT5 session = %SID% -- ok to restart.
 
 REM 2) Stop every XAU bot (python.exe in a non-zero session). Converges even if
 REM    duplicates exist. vol (session 0) is untouched.
-for /f "usebackq" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.SessionId -ne 0 } | Select-Object -ExpandProperty ProcessId"`) do (
+REM Kill ONLY the bot's python (match its module on the command line) — NOT every
+REM session!=0 python, because the UG listener + copier now also run there and
+REM must survive a bot restart.
+for /f "usebackq" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.SessionId -ne 0 -and $_.CommandLine -match '-m scripts.live_signal_bot' } | Select-Object -ExpandProperty ProcessId"`) do (
   echo [restart] stopping XAU bot PID %%p
   taskkill /F /PID %%p >nul 2>&1
 )
