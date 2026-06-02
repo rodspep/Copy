@@ -36,27 +36,51 @@ ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "mid", 150.0: "mid"}
 OBSERVE_ONLY_TP1 = (100.0, 150.0)      # not real-money edges; demo observation only
 ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
+# EXIT strategy (scripts/ug_exit_strategy.py, Codex-reviewed): instead of taking the
+# whole position at TP1, split into TWO equal legs at the SAME entry+SL —
+#   leg 'tp1' : TP = TP1  (locks the high-probability scalp win)
+#   leg 'tp3' : TP = TP3  (runner; its SL is moved to break-even once leg 'tp1' wins)
+# On the collected week this nearly doubled net (50pip bucket: +$53.40 vs +$30.90)
+# at no extra risk on the runner after TP1. The broker closes each leg at its own TP
+# natively; the copier only moves the runner's SL to BE after the TP1 leg closes.
+# Kill-switch: set RUNNER_TP3=False to revert to a single TP1-full order.
+RUNNER_TP3 = True
+
 
 @dataclass(frozen=True)
 class Order:
     side: str                   # 'long' | 'short'
     order_type: str             # 'buy_limit' | 'sell_limit'
-    entry: float                # limit price (deep edge of the zone)
+    entry: float                # limit price
     sl: float
-    tp: float                   # TP1 from entry
+    tp: float                   # this leg's TP price
     volume: float
-    tp1_pip: float
+    tp1_pip: float              # method identity (TP1 pip) — same for both legs
+    leg: str = "tp1"            # 'tp1' (scalp) | 'tp3' (runner, SL→BE after tp1 wins)
+    tp_pip: float = 0.0         # this leg's TP distance in pip from entry
 
 
 @dataclass(frozen=True)
 class Decision:
     action: str                 # 'place' | 'skip'
     reason: str
-    order: Order | None = None
+    orders: tuple = ()          # bracket legs to place (1 = TP1-only; 2 = TP1+TP3)
+
+    @property
+    def order(self) -> Order | None:
+        """First leg (TP1) — convenience for callers/tests that want a single order."""
+        return self.orders[0] if self.orders else None
 
 
 def _f(v):
-    return None if v in (None, "") else float(v)
+    """Coerce to float; None for empty/None/non-numeric (never raises, so a malformed
+    signal field degrades to a safe skip instead of crashing the poll loop)."""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def decide(sig: dict, current_price: float, volume: float = 0.01,
@@ -66,6 +90,8 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     real_mode=True (trading real money) restricts to the proven edge only: the
     observation-only methods (OBSERVE_ONLY_TP1) are skipped so demo-only data
     gathering never risks real funds."""
+    if not isinstance(sig, dict):
+        return Decision("skip", f"bad signal {sig!r}")
     direction = sig.get("direction")
     if direction not in ("long", "short"):
         return Decision("skip", f"bad direction {direction!r}")
@@ -74,7 +100,10 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     if not isinstance(volume, (int, float)) or not math.isfinite(volume) or volume <= 0:
         return Decision("skip", f"invalid volume {volume!r}")
 
-    tp1_raw = _f((sig.get("tps_pip") or {}).get(1) or (sig.get("tps_pip") or {}).get("1"))
+    tps = sig.get("tps_pip")
+    if not isinstance(tps, dict):
+        tps = {}
+    tp1_raw = _f(tps.get(1) or tps.get("1"))
     if tp1_raw is None or not math.isfinite(tp1_raw):
         return Decision("skip", "no/invalid TP1")
     # Canonicalize to an allowed key with tolerance so a computed float (e.g.
@@ -122,9 +151,27 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
         if current_price >= entry:
             return Decision("skip", f"price {current_price} already at/above entry {entry}")
 
-    return Decision("place", "ok", Order(
-        side=direction, order_type=otype, entry=round(entry, 3),
-        sl=round(sl, 3), tp=round(tp, 3), volume=volume, tp1_pip=tp1_pip))
+    entry_r, sl_r = round(entry, 3), round(sl, 3)
+    leg_tp1 = Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
+                    tp=round(tp, 3), volume=volume, tp1_pip=tp1_pip,
+                    leg="tp1", tp_pip=tp1_pip)
+
+    # Runner leg to TP3 (only if enabled AND the signal carries a valid, further TP3).
+    # If TP3 is missing/malformed, degrade safely to a single TP1-full order.
+    if RUNNER_TP3:
+        tp3_raw = _f(tps.get(3) or tps.get("3"))
+        if tp3_raw is not None and math.isfinite(tp3_raw) and tp3_raw > tp1_pip + 1e-9:
+            tp3_price = entry + sign * tp3_raw * PIP
+            # tp3 must be strictly beyond tp1 on the profit side (sign already ensures
+            # direction; tp3_raw>tp1_pip ensures further). Belt-and-suspenders check:
+            beyond = (tp3_price > tp > entry) if direction == "long" else (tp3_price < tp < entry)
+            if beyond:
+                leg_tp3 = Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
+                                tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
+                                leg="tp3", tp_pip=tp3_raw)
+                return Decision("place", "ok", orders=(leg_tp1, leg_tp3))
+
+    return Decision("place", "ok", orders=(leg_tp1,))
 
 
 def should_cancel_pending(order: Order, current_price: float) -> bool:

@@ -99,6 +99,45 @@ def test_missing_fields_skipped():
                    "sl": 0.5, "tps_pip": {}}, 4465).action == "skip"
 
 
+def test_bracket_two_legs_tp1_and_tp3():
+    # long 50pip with TP3=150pip: two legs, same entry/sl/vol, TP1 then TP3 target.
+    d = decide(_buy(tp1=50, lo=4468, hi=4458, sl=4448), current_price=4465)
+    assert d.action == "place"
+    assert len(d.orders) == 2
+    a, b = d.orders
+    assert a.leg == "tp1" and b.leg == "tp3"
+    assert a.entry == b.entry == 4463 and a.sl == b.sl == 4448
+    assert a.volume == b.volume == 0.01
+    assert a.tp == round(4463 + 50 * 0.1, 3)        # 4468 (TP1 = 50pip)
+    assert b.tp == round(4463 + 300 * 0.1, 3)       # 4493 (TP3 = _buy fixture's tps_pip[3]=300)
+    assert b.tp_pip == 300
+    assert a.tp1_pip == b.tp1_pip == 50             # method identity carried on both legs
+    # runner TP is strictly beyond the scalp TP, both above entry for a long
+    assert b.tp > a.tp > a.entry
+
+
+def test_bracket_short_legs_below_entry():
+    d = decide(_sell(tp1=50, lo=4552, hi=4555, sl=4565), current_price=4553)
+    assert d.action == "place" and len(d.orders) == 2
+    a, b = d.orders
+    assert a.leg == "tp1" and b.leg == "tp3"
+    assert b.tp < a.tp < a.entry                    # both TPs below entry for a short
+
+
+def test_bracket_degrades_to_single_without_tp3():
+    sig = {"direction": "long", "entry_low": 4468, "entry_high": 4458, "sl": 4448,
+           "tps_pip": {1: 50, 2: 100}}              # no TP3
+    d = decide(sig, current_price=4465)
+    assert d.action == "place" and len(d.orders) == 1
+    assert d.orders[0].leg == "tp1"
+
+
+def test_bracket_skip_propagates_to_no_orders():
+    # a skip yields zero orders (no leg ever placed)
+    d = decide(_buy(tp1=200), 4465)                 # filtered TP1
+    assert d.action == "skip" and d.orders == () and d.order is None
+
+
 def test_should_cancel_pending():
     o = Order("long", "buy_limit", 4458, 4448, 4473, 0.01, 150)
     assert should_cancel_pending(o, 4474) is True     # reached TP1 unfilled
