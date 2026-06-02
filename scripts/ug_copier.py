@@ -234,6 +234,9 @@ def main() -> int:
     ap.add_argument("--poll", type=int, default=30)
     ap.add_argument("--expiry-min", type=int, default=240, help="cancel unfilled pending after N min")
     ap.add_argument("--max-open", type=int, default=5, help="hard cap on concurrent placed orders")
+    ap.add_argument("--max-signal-age-min", type=float, default=15.0,
+                    help="skip signals older than N minutes (UG edge is fresh; guards "
+                         "against stale reposts / feed backlog being placed late)")
     ap.add_argument("--allow-real", action="store_true",
                     help="permit --live on a REAL account (default: live allowed on DEMO only)")
     args = ap.parse_args()
@@ -294,6 +297,16 @@ def main() -> int:
                     lag = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(sig["ts"])).total_seconds()
                 except Exception:
                     lag = -1.0
+                # STALE GUARD: UG's edge is a fresh pull-back; a signal we only see
+                # long after its post (old repost, feed backlog, key-format migration)
+                # must NOT be placed. A bad/unparseable ts (lag<0) is also untrusted.
+                # Mark done so it is never reconsidered.
+                if lag < 0 or lag > args.max_signal_age_min * 60:
+                    print(f"  [{now_iso()}] STALE skip {sig.get('direction')} "
+                          f"(lag {lag:.0f}s > {args.max_signal_age_min:g}min) — not placing")
+                    st["done"][k] = {"stale": lag, "at": now_iso()}
+                    _save_state(st)        # durable: never reconsider across restart
+                    continue
                 d = decide(sig, mid, volume=args.volume, real_mode=args.allow_real)
                 if d.action == "skip":
                     print(f"  [{now_iso()}] (lag {lag:.1f}s) SKIP {sig.get('direction')} — {d.reason}")
