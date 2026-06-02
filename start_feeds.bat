@@ -8,7 +8,8 @@ set "BOTDIR=C:\mt5-bot"
 cd /d "%BOTDIR%"
 echo [feeds] stopping any existing listener/copier...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and ($_.CommandLine -match 'scripts.ug_reader' -or $_.CommandLine -match 'scripts.ug_copier') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-ping -n 3 127.0.0.1 >nul 2>&1
+ping -n 6 127.0.0.1 >nul 2>&1
+del /q "%BOTDIR%\data\ug\copier_live.lock" "%BOTDIR%\data\ug\copier_dry.lock" 2>nul
 echo [feeds] starting listener + copier...
 call "%BOTDIR%\run_listener.bat"
 call "%BOTDIR%\run_copier.bat"

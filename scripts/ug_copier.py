@@ -1,14 +1,20 @@
-"""UG signal copier — filter, place limit at the deep edge, manage. MT5 / VPS.
+"""UG signal copier — filter, place a pending LIMIT, manage. MT5 / VPS.
 
 Reads parsed UG signals from a file feed (data/ug/live_signals.jsonl), and for
-each NEW signal: decide() (filter TP1∈{100,150}, deep-edge entry, TP from entry,
-skip if price past TP1) → place a pending LIMIT (or DRY-log). Tracks placed
-pendings and CANCELS any that hasn't filled once price reaches TP1 (don't chase)
-or after an expiry.
+each NEW signal: decide() [filter TP1∈{50,100,150}; entry per method (50→mid,
+100→near, 150→deep); TP=TP1 from that entry; skip if price past TP1 / wrong side]
+→ place a pending LIMIT (or DRY-log). Tracks placed pendings and CANCELS any that
+hasn't filled once price reaches TP1 (don't chase) or after an expiry.
 
-SAFETY: DRY-RUN by default (real prices, no orders). Pass --live to actually
-place orders. Volume defaults to 0.01. Only orders tagged with our MAGIC are ever
-touched. Run inside the MT5 interactive session (like the signal bot).
+DESIGN — TP1-only, all-out: we set ONE TP (=TP1) and the broker SL on the pending.
+Once it fills, the position runs to that SL/TP under MT5 (we do NOT do UG's
+TP1..TP4 partials / break-even / trailing). That is intentional for now.
+
+SAFETY: DRY-RUN by default (real prices, no orders). --live places real orders and
+ABORTS unless the account is DEMO (override: --allow-real). The broker RE-checks
+the account on every send. Singleton lock prevents two copiers. Exposure cap
+(--max-open). Volume 0.01. Only orders tagged with our MAGIC are touched. Run
+inside the MT5 interactive session (like the signal bot).
 
 Feed line = one parsed UG signal dict (see scripts/parse_ug_export.py), e.g.:
   {"ts":"...","direction":"long","entry_low":4468,"entry_high":4458,"sl":4448,
@@ -81,9 +87,21 @@ def main() -> int:
     args = ap.parse_args()
 
     global STATE
-    STATE = Path(f"data/ug/copier_state_{'live' if args.live else 'dry'}.json")
+    mode_tag = "live" if args.live else "dry"
+    STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
+
+    # Singleton lock — refuse to start if another copier of this mode is alive
+    # (a fresh heartbeat lock). Prevents two processes double-placing the same
+    # signal / bypassing the exposure cap.
+    LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK.exists() and (time.time() - LOCK.stat().st_mtime) < max(20, args.poll * 3):
+        raise SystemExit(f"ABORT: another {mode_tag} copier appears to be running "
+                         f"(lock {LOCK.name} is fresh). Stop it first.")
+    LOCK.write_text(str(os.getpid()))
+
     from src.exec.broker import Mt5Broker, DryRunBroker
-    broker = Mt5Broker() if args.live else DryRunBroker()
+    broker = Mt5Broker(require_demo=not args.allow_real) if args.live else DryRunBroker()
     mode = "LIVE" if args.live else "DRY-RUN"
     print(f"UG copier {mode} · {args.symbol} · vol {args.volume} · poll {args.poll}s "
           f"· expiry {args.expiry_min}min")
@@ -104,6 +122,7 @@ def main() -> int:
 
     while True:
         try:
+            LOCK.write_text(str(os.getpid()))     # heartbeat (keeps singleton lock fresh)
             px = broker.get_price(args.symbol)
             if not px:
                 print(f"  [{now_iso()}] no price for {args.symbol}; retry")

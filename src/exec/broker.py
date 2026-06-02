@@ -16,11 +16,26 @@ COMMENT = "ug_copier"
 
 
 class Mt5Broker:
-    def __init__(self):
+    def __init__(self, require_demo: bool = True):
         from src.data import mt5_feed
         mt5_feed.init()                       # attach to the running terminal
         import MetaTrader5 as mt5
         self.mt5 = mt5
+        self.require_demo = require_demo
+        acc = mt5.account_info()
+        self._login = acc.login if acc else None       # lock the startup account
+
+    def _account_ok(self) -> tuple[bool, str]:
+        """Re-verify (every send) that the account hasn't changed and, unless
+        explicitly allowed, is still a DEMO account."""
+        acc = self.mt5.account_info()
+        if acc is None:
+            return False, "no account_info"
+        if self._login is not None and acc.login != self._login:
+            return False, f"account changed {self._login}->{acc.login}"
+        if self.require_demo and acc.trade_mode != self.mt5.ACCOUNT_TRADE_MODE_DEMO:
+            return False, f"account {acc.login} is NOT demo (require_demo)"
+        return True, ""
 
     def get_price(self, symbol: str):
         if not self.mt5.symbol_select(symbol, True):
@@ -71,6 +86,10 @@ class Mt5Broker:
 
     def place_limit(self, symbol: str, o: Order) -> int | None:
         mt5 = self.mt5
+        ok, why = self._account_ok()             # re-verify account EVERY send
+        if not ok:
+            print(f"  [mt5] BLOCKED place_limit — {why}")
+            return None
         if not self._stops_ok(symbol, o):
             print(f"  [mt5] SL/TP too close to entry (stops_level) — reject {o.entry}")
             return None
