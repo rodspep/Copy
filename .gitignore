@@ -2,6 +2,7 @@
 configs/telegram.json
 configs/mt5.json
 configs/ug.json
+configs/copier_telegram.json
 # Telethon user-session = FULL Telegram account access. Never commit.
 *.session
 *.session-journal

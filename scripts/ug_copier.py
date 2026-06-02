@@ -28,9 +28,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
 import time
 from datetime import timedelta, timezone
 from pathlib import Path
+
+import requests
 
 import pandas as pd
 
@@ -65,6 +68,102 @@ def _acquire_singleton(path: Path) -> None:
         pass
 
 
+def _paused() -> bool:
+    return PAUSE_FLAG.exists()
+
+
+def _stats_text() -> str:
+    s = trade_db.summary()
+    lines = [f"📊 <b>UG Copier — Track record</b>",
+             f"Tổng: {s['total']} · chờ {s['pending']} · đang mở {s['filled']} · hủy {s['cancelled']}",
+             f"Đã đóng: {s['closed']} (✅ {s['wins']} / ❌ {s['losses']})",
+             f"🎯 Win-rate: <b>{s['winrate']:.0%}</b> · 💰 P/L: <b>{s['pnl']:+.2f} USD</b>"]
+    if s["by_method"]:
+        lines.append("— theo method —")
+        for m, d in s["by_method"].items():
+            lines.append(f"  TP1 {m:g}pip: {d['closed']} đóng · win {d['wins']} · {d['pnl']:+.2f} USD")
+    return "\n".join(lines)
+
+
+def _open_text() -> str:
+    rows = trade_db.open_trades()
+    if not rows:
+        return "📭 Không có lệnh đang mở/chờ."
+    out = [f"📂 <b>{len(rows)} lệnh mở/chờ</b>:"]
+    for r in rows:
+        st = "⏳chờ" if r["status"] == "pending" else "📈mở"
+        out.append(f"{st} #{r['id']} {r['direction']} @{r['entry']:.2f} "
+                   f"SL {r['sl']:.2f} TP {r['tp']:.2f} (TP1 {r['method_pip']:g})")
+    return "\n".join(out)
+
+
+def _last_text(n: int = 8) -> str:
+    rows = trade_db.recent(n)
+    if not rows:
+        return "📭 Chưa có lệnh nào."
+    icons = {"pending": "⏳", "filled": "📈", "cancelled": "🚫",
+             "closed_tp": "✅", "closed_sl": "❌"}
+    out = [f"📜 <b>{len(rows)} lệnh gần nhất</b>:"]
+    for r in rows:
+        pl = f" {r['profit']:+.2f}$" if r["profit"] is not None else ""
+        out.append(f"{icons.get(r['status'],'•')} #{r['id']} {r['direction']} "
+                   f"@{r['entry']:.2f} [{r['status']}{pl}]")
+    return "\n".join(out)
+
+
+def _command_loop(broker, symbol: str) -> None:
+    """Long-poll the COPIER's own bot (separate token) → /stats /open /last /flat
+    /pause /resume. No conflict with the signal bot (different token)."""
+    c = notify.creds()
+    if not c:
+        print("  [cmd] no copier bot creds — command loop disabled")
+        return
+    token, chat = c
+    api = lambda m: f"https://api.telegram.org/bot{token}/{m}"
+    try:
+        r = requests.get(api("getUpdates"), params={"timeout": 0}, timeout=20).json()
+        offset = r["result"][-1]["update_id"] + 1 if r.get("result") else 0
+    except Exception:
+        offset = 0
+    print("  [cmd] copier command loop online")
+    while True:
+        try:
+            r = requests.get(api("getUpdates"), params={"offset": offset, "timeout": 25},
+                             timeout=35).json()
+            cmds = {}
+            for u in r.get("result", []):
+                offset = u["update_id"] + 1
+                msg = u.get("message") or u.get("channel_post") or {}
+                if str((msg.get("chat") or {}).get("id", "")) != chat:
+                    continue
+                text = (msg.get("text") or "").strip().lower()
+                if text.startswith("/"):
+                    cmds[text[1:].split()[0].split("@")[0]] = True   # coalesce per batch
+            for w in cmds:
+                if w in ("stats",):
+                    notify.send(_stats_text())
+                elif w in ("open", "positions"):
+                    notify.send(_open_text())
+                elif w == "last":
+                    notify.send(_last_text())
+                elif w in ("flat", "cancelall", "flatten"):
+                    n = broker.cancel_all_pendings(symbol)
+                    notify.send("🧹 Đã hủy " + (f"{n} lệnh chờ." if n is not None
+                                else "(query lỗi)") + " (vị thế đang mở KHÔNG đóng — tự làm trong MT5).")
+                elif w in ("pause", "stop"):
+                    PAUSE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+                    PAUSE_FLAG.write_text("paused")
+                    notify.send("⏸ <b>Tạm dừng</b> đặt lệnh mới (lệnh đang mở vẫn quản lý). /resume để chạy lại.")
+                elif w in ("resume", "start"):
+                    PAUSE_FLAG.unlink(missing_ok=True)
+                    notify.send("▶️ <b>Tiếp tục</b> đặt lệnh.")
+                elif w in ("help", "commands"):
+                    notify.send("Lệnh: /stats /open /last /flat /pause /resume")
+        except Exception as e:
+            print(f"  [cmd] loop error {e}")
+            time.sleep(5)
+
+
 def _vn(ts_iso: str) -> str:
     try:
         t = pd.Timestamp(ts_iso)
@@ -86,6 +185,7 @@ def _place_msg(o, sig, lag: float) -> str:
             f"🕐 từ UG {_vn(sig.get('ts',''))} · lag {lag:.0f}s")
 
 FEED = Path("data/ug/live_signals.jsonl")
+PAUSE_FLAG = Path("data/ug/copier_paused.flag")
 # State path is set per run-mode (live vs dry) so a dry-run can never poison the
 # live dedup/exposure record. Assigned in main().
 STATE = Path("data/ug/copier_state.json")
@@ -166,8 +266,11 @@ def main() -> int:
     st = _load_state()
     trade_db.init_db()
     now_iso = lambda: pd.Timestamp.now(tz="UTC").isoformat()
+    # copier's own command bot (separate token) → /stats /open /last /flat /pause
+    threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
     notify.send(f"📥 <b>UG Copier khởi động</b> — {mode} · {args.symbol} · vol "
-                f"{args.volume} · lọc TP1∈{{50,100,150}} · đang theo dõi UG.")
+                f"{args.volume} · lọc TP1∈{{50,100,150}} · đang theo dõi UG.\n"
+                f"Lệnh: /stats /open /last /flat /pause /resume")
 
     while True:
         try:
@@ -177,8 +280,8 @@ def main() -> int:
                 time.sleep(args.poll); continue
             mid = px["mid"]
 
-            # 1) New signals → decide + place.
-            for sig in _read_feed():
+            # 1) New signals → decide + place (skipped while paused; management still runs).
+            for sig in ([] if _paused() else _read_feed()):
                 k = _key(sig)
                 if k in st["done"]:
                     continue

@@ -133,6 +133,13 @@ class Mt5Broker:
         to = datetime.now(timezone.utc) + timedelta(days=1)
         return self.mt5.history_deals_get(frm, to, **kw)
 
+    def cancel_all_pendings(self, symbol: str) -> int | None:
+        """Cancel every resting magic pending (the /flat command). None if query failed."""
+        pend = self.pending_tickets(symbol)
+        if pend is None:
+            return None
+        return sum(1 for tk in list(pend) if self.cancel(tk))
+
     def fill_info(self, order_ticket: int):
         """Filled → {position_id, fill_price}; confirmed-not-filled → None;
         history query FAILED → "unknown" (so the caller doesn't misread a transient

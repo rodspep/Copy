@@ -1,39 +1,41 @@
-"""Telegram notifications for the copier (send + reply). Send-only — no getUpdates
-(so it never conflicts with the signal bot's command long-poll on the same token).
+"""Telegram for the UG copier — its OWN dedicated bot (separate from the signal
+bot), so notifications + commands are fully independent (no getUpdates conflict).
 
-Uses configs/telegram.json: bot_token + (copier_chat_id or chat_id). Failures are
-swallowed (a Telegram hiccup must never break trading).
+Config: configs/copier_telegram.json  { "bot_token": "...", "chat_id": "..." }
+Send-only here; the copier's command loop reuses creds() for getUpdates.
+Failures are swallowed (a Telegram hiccup must never break trading).
 """
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import requests
 
-_CFG = Path("configs/telegram.json")
+_CFG = Path("configs/copier_telegram.json")
 _API = "https://api.telegram.org/bot{t}/{m}"
 _cache: dict = {}
 
 
-def _creds() -> tuple[str, str] | None:
+def creds() -> tuple[str, str] | None:
+    """(bot_token, chat_id) for the copier's dedicated bot, or None if not set."""
     if "tok" in _cache:
         return _cache["tok"], _cache["chat"]
-    token = chat = ""
-    if _CFG.exists():
-        try:
-            c = json.loads(_CFG.read_text(encoding="utf-8-sig"))
-            token = str(c.get("bot_token") or "")
-            chat = str(c.get("copier_chat_id") or c.get("chat_id") or "")
-        except Exception:
-            pass
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN", token) or "").strip()
-    chat = (os.environ.get("TELEGRAM_CHAT_ID", chat) or "").strip()
-    if not token or not chat:
+    if not _CFG.exists():
+        return None
+    try:
+        c = json.loads(_CFG.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    token = str(c.get("bot_token") or "").strip()
+    chat = str(c.get("chat_id") or "").strip()
+    if not token or not chat or "PUT_" in token:
         return None
     _cache["tok"], _cache["chat"] = token, chat
     return token, chat
+
+
+_creds = creds       # backward-compat alias
 
 
 def send(text: str, reply_to: int | None = None) -> int | None:
