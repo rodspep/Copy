@@ -294,7 +294,7 @@ def main() -> int:
                     lag = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(sig["ts"])).total_seconds()
                 except Exception:
                     lag = -1.0
-                d = decide(sig, mid, volume=args.volume)
+                d = decide(sig, mid, volume=args.volume, real_mode=args.allow_real)
                 if d.action == "skip":
                     print(f"  [{now_iso()}] (lag {lag:.1f}s) SKIP {sig.get('direction')} — {d.reason}")
                     st["done"][k] = {"skipped": d.reason, "at": now_iso()}

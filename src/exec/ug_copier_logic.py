@@ -7,9 +7,10 @@ order is ever placed.
 
 UG signal geometry (decoded — see docs/decisions/ug_logic_decode.md):
   - Entry is a ZONE "A - B"; SL is a fixed price; TP1..TP4 in pip (1 pip = 0.1 px).
-  - Entry within the zone is chosen PER METHOD (ENTRY_MODE_BY_TP1, from the
-    ug_entry_compare backtest): TP1=50→mid, TP1=100→near, TP1=150→deep.
-  - Take TP1 ∈ {50, 100, 150} pip (PP2 scalp included for the demo data-gathering).
+  - Entry within the zone is chosen PER METHOD (ENTRY_MODE_BY_TP1) — all MID for now.
+  - TP1 = 50 pip (PP2 scalp), entry MID, is the ONLY proven edge. TP1 ∈ {100, 150}
+    are kept ON DEMO purely for OBSERVATION (gather comparison data) — NOT promoted
+    to real money until they show an edge. See ENTRY_MODE_BY_TP1 below.
   - If price has ALREADY run to/past TP1, the move is done → skip (UG's own
     "nếu giá đã chạy đến TP1, KHÔNG vào").
 """
@@ -18,16 +19,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 PIP = 0.1                       # XAU: 1 pip = 0.1 price
-# Methods we trade + the entry edge per method (scripts/ug_entry_compare.py, but
-# samples are SMALL — provisional, revisit after demo accrues data):
-#   TP1=50  (PP2 scalp): MID  — best net (+2.38), good fill, WR ~89%.
-#   TP1=100            : NEAR — 'near' (1st number) had the best net (+7.68) in
-#                               the tiny n=5 sample; user wants to test it on the
-#                               demo. (Note: near = worst R:R ~0.5 vs the fixed SL,
-#                               and n is small — provisional, revisit with data.)
-#   TP1=150            : DEEP — best net (−0.96, least bad), tightest risk to SL.
-# near = entry_low (1st number, entry-side); deep = entry_high (2nd, SL-side).
-ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "near", 150.0: "deep"}
+# Entry edge per method, from a full-history backtest of every collected UG signal
+# on real M1 (scripts/ug_method_pnl.py, 93 signals, 26/5–1/6, limit fill + 3pip
+# cost, 0.01 lot):
+#   TP1=50  (PP2 scalp), MID : +$30.90, WR 78%, +0.116R — the ONLY proven edge.
+#   TP1=100                  : every entry mode net-negative (n=6, thin).
+#   TP1=150 (PRI-GOLD)       : when filled, WR ~40% → net-negative (n=16). 'deep'
+#                              never fills (no data), so we observe it at MID.
+# DECISION (user): trade 50-mid for real; keep 100 & 150 ON DEMO at MID purely to
+# OBSERVE / accumulate comparison data via /stats by_method. They are NOT edges yet
+# — do NOT enable them for real money until the demo data says otherwise. Entry held
+# at MID across all three so the only variable compared is TP1 size.
+# near=entry_low (entry-side); deep=entry_high (SL-side); mid=midpoint.
+ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "mid", 150.0: "mid"}
+OBSERVE_ONLY_TP1 = (100.0, 150.0)      # not real-money edges; demo observation only
 ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
 
@@ -53,8 +58,13 @@ def _f(v):
     return None if v in (None, "") else float(v)
 
 
-def decide(sig: dict, current_price: float, volume: float = 0.01) -> Decision:
-    """Decide what to do with a parsed UG signal at the current market price."""
+def decide(sig: dict, current_price: float, volume: float = 0.01,
+           real_mode: bool = False) -> Decision:
+    """Decide what to do with a parsed UG signal at the current market price.
+
+    real_mode=True (trading real money) restricts to the proven edge only: the
+    observation-only methods (OBSERVE_ONLY_TP1) are skipped so demo-only data
+    gathering never risks real funds."""
     direction = sig.get("direction")
     if direction not in ("long", "short"):
         return Decision("skip", f"bad direction {direction!r}")
@@ -64,6 +74,8 @@ def decide(sig: dict, current_price: float, volume: float = 0.01) -> Decision:
         return Decision("skip", "no TP1")
     if tp1_pip not in ALLOWED_TP1_PIP:
         return Decision("skip", f"filtered: TP1={tp1_pip:g}pip (only {ALLOWED_TP1_PIP})")
+    if real_mode and tp1_pip in OBSERVE_ONLY_TP1:
+        return Decision("skip", f"observe-only TP1={tp1_pip:g}pip not traded on real money")
 
     lo, hi = _f(sig.get("entry_low")), _f(sig.get("entry_high"))
     sl = _f(sig.get("sl"))
