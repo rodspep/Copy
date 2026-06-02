@@ -96,18 +96,26 @@ def cmd_list(cfg: dict, query: str | None) -> int:
 
 
 def _resolve(client, ug_chat):
-    """Resolve ug_chat (id / @username / exact title) to a Telethon entity."""
+    """Resolve ug_chat (id / @username / exact title) to a Telethon entity.
+
+    For a bare numeric id, get_entity(id) needs the access_hash cached — a freshly
+    authed session doesn't have it. So we iterate dialogs first (which POPULATES
+    the entity cache) and match by id/title there. You have a DM with the UG bot,
+    so it's in your dialogs.
+    """
     if ug_chat is None:
         raise SystemExit("Set 'ug_chat' in configs/ug.json (run --list to find it).")
     s = str(ug_chat)
-    if s.lstrip("-").isdigit():
-        return client.get_entity(int(s))
     if s.startswith("@"):
         return client.get_entity(s)
-    for d in client.iter_dialogs():          # fall back to exact title match
-        if (d.name or "") == s:
+    target_id = int(s) if s.lstrip("-").isdigit() else None
+    for d in client.iter_dialogs():          # caches entities + matches
+        if target_id is not None and getattr(d.entity, "id", None) == target_id:
             return d.entity
-    return client.get_entity(s)
+        if target_id is None and (d.name or "") == s:
+            return d.entity
+    # fallback (works now that dialogs are cached)
+    return client.get_entity(target_id if target_id is not None else s)
 
 
 def _record(m) -> dict:
