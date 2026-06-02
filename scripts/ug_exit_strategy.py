@@ -149,6 +149,66 @@ def resolve(m1, fill, legs, be_after_tp1, spread_pip):
     return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, True)
 
 
+def resolve_trail(m1, fill, tp1_frac, trail_pip, spread_pip):
+    """Trailing-stop strategies. tp1_frac (0 or 0.5) = portion banked at TP1 first;
+    the rest TRAILS by `trail_pip` behind the high-water mark, with a break-even floor
+    once TP1 is banked. tp1_frac=0 => trail the whole position from fill (no partial).
+
+    Conservative bar model: each bar, check the stop AS IT STOOD AT THE PRIOR BAR CLOSE
+    (adverse-first), THEN raise the trail from this bar's extreme (never loosen). The
+    partial's same-bar break-even stop IS re-checked (matches resolve())."""
+    entry, sl0, sign, tps, j = fill
+    risk = abs(entry - sl0)
+    hi_a, lo_a, cl = m1["high"].values, m1["low"].values, m1["close"].values
+    tp1_price = entry + sign * float(tps["1"]) * PIP
+    long = sign > 0
+    stop = sl0
+    hwm = entry                                  # favourable extreme so far
+    remaining = 1.0
+    move = 0.0
+    booked_tp1 = (tp1_frac <= 0)
+    trail_on = (tp1_frac <= 0)                   # full-trail: active from fill
+    k, n = j, len(m1)
+    while k < n and remaining > 1e-9:
+        lo_b, hi_b = lo_a[k], hi_a[k]
+        # 1) adverse: stop (as of prior close) hit -> close remaining at stop
+        if (lo_b <= stop) if long else (hi_b >= stop):
+            move += (stop - entry) * sign * remaining
+            return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, True)
+        # 2) bank the TP1 partial the first bar it is reached
+        if not booked_tp1:
+            if (hi_b >= tp1_price) if long else (lo_b <= tp1_price):
+                move += (tp1_price - entry) * sign * tp1_frac
+                remaining -= tp1_frac
+                booked_tp1 = True
+                trail_on = True
+                stop = max(stop, entry) if long else min(stop, entry)   # BE floor
+                if (lo_b <= stop) if long else (hi_b >= stop):           # same-bar BE
+                    move += (stop - entry) * sign * remaining            # = 0 at BE
+                    return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE,
+                            move / risk, True)
+        # 3) raise the trail from THIS bar's extreme (ratchet up only), for next bar
+        if trail_on:
+            hwm = max(hwm, hi_b) if long else min(hwm, lo_b)
+            newstop = hwm - trail_pip * PIP if long else hwm + trail_pip * PIP
+            if booked_tp1 and tp1_frac > 0:                              # BE floor on runner
+                newstop = max(newstop, entry) if long else min(newstop, entry)
+            stop = max(stop, newstop) if long else min(stop, newstop)
+        k += 1
+    if remaining > 1e-9:
+        move += (cl[n - 1] - entry) * sign * remaining
+        return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, False)
+    return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, True)
+
+
+TRAIL_STRATEGIES = {
+    "full trail 50pip":        (0.0, 50.0),
+    "full trail 100pip":       (0.0, 100.0),
+    "50% TP1 + 50% trail50":   (0.5, 50.0),
+    "50% TP1 + 50% trail100":  (0.5, 100.0),
+}
+
+
 STRATEGIES = {
     "TP1 full (now)":      (lambda: [(1.0, 1)], False),
     "TP2 full":            (lambda: [(1.0, 2)], False),
@@ -173,13 +233,15 @@ def main():
         if not fills:
             print("  (no fills)\n"); continue
         print(f"  {'strategy':<24}{'net $':>10}{'meanR':>9}{'avg$/trade':>12}{'unresolved':>12}")
-        for name, (legf, be) in STRATEGIES.items():
-            legs = legf()
-            outs = [resolve(m1, f, legs, be, spread_pip) for f in fills]
+        def row(name, outs):
             usd = sum(o[0] for o in outs)
             meanR = sum(o[1] for o in outs) / len(outs)
             unres = sum(1 for o in outs if not o[2])
             print(f"  {name:<24}{usd:>+10.2f}{meanR:>+9.3f}{usd/len(outs):>+12.2f}{unres:>12}")
+        for name, (legf, be) in STRATEGIES.items():
+            row(name, [resolve(m1, f, legf(), be, spread_pip) for f in fills])
+        for name, (tp1f, trail) in TRAIL_STRATEGIES.items():
+            row(name, [resolve_trail(m1, f, tp1f, trail, spread_pip) for f in fills])
         print()
 
 
