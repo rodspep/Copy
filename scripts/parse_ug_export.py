@@ -32,8 +32,9 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-
-from bs4 import BeautifulSoup
+# NOTE: bs4 is imported lazily inside main() — only the HTML export path needs it.
+# parse_signal() (used by the live listener) is pure-regex, so importing it must
+# not require bs4 (the VPS venv doesn't have it).
 
 PIP = 0.1                                  # XAU: 1 pip = 0.1 price (assumption — verify)
 OUT_DIR = Path("data/ug")
@@ -137,6 +138,7 @@ def main() -> int:
     ap.add_argument("--out", default=str(OUT_DIR))
     args = ap.parse_args()
 
+    from bs4 import BeautifulSoup        # lazy: only the HTML export path needs bs4
     soup = BeautifulSoup(Path(args.html).read_text(encoding="utf-8"), "html.parser")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
