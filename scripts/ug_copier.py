@@ -41,6 +41,30 @@ PIP = 0.1
 VN = timezone(timedelta(hours=7))
 
 
+_LOCK_HANDLE = None
+
+
+def _acquire_singleton(path: Path) -> None:
+    """OS-held exclusive lock (Windows msvcrt). A second copier physically cannot
+    acquire it → it aborts. Stronger than a heartbeat file (can't be defeated by a
+    restart script deleting the lock). The handle is held for the process lifetime."""
+    global _LOCK_HANDLE
+    import msvcrt
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _LOCK_HANDLE = path.open("a+b")
+    try:
+        _LOCK_HANDLE.seek(0)        # ALWAYS lock byte 0 (not the append position)
+        msvcrt.locking(_LOCK_HANDLE.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        raise SystemExit(f"ABORT: another copier already owns {path.name}")
+    try:                           # write our PID for observability (owning handle)
+        _LOCK_HANDLE.seek(0)
+        _LOCK_HANDLE.write(str(os.getpid()).encode("ascii"))
+        _LOCK_HANDLE.flush()
+    except OSError:
+        pass
+
+
 def _vn(ts_iso: str) -> str:
     try:
         t = pd.Timestamp(ts_iso)
@@ -120,11 +144,7 @@ def main() -> int:
     # (a fresh heartbeat lock). Prevents two processes double-placing the same
     # signal / bypassing the exposure cap.
     LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
-    if LOCK.exists() and (time.time() - LOCK.stat().st_mtime) < max(20, args.poll * 3):
-        raise SystemExit(f"ABORT: another {mode_tag} copier appears to be running "
-                         f"(lock {LOCK.name} is fresh). Stop it first.")
-    LOCK.write_text(str(os.getpid()))
+    _acquire_singleton(LOCK)        # OS lock — a 2nd copier can't start, period
 
     from src.exec.broker import Mt5Broker, DryRunBroker
     broker = Mt5Broker(require_demo=not args.allow_real) if args.live else DryRunBroker()
@@ -151,7 +171,6 @@ def main() -> int:
 
     while True:
         try:
-            LOCK.write_text(str(os.getpid()))     # heartbeat (keeps singleton lock fresh)
             px = broker.get_price(args.symbol)
             if not px:
                 print(f"  [{now_iso()}] no price for {args.symbol}; retry")
