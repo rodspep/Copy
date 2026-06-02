@@ -29,11 +29,37 @@ import argparse
 import json
 import os
 import time
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from src.exec.ug_copier_logic import decide, should_cancel_pending, Order
+from src.exec.ug_copier_logic import decide
+from src.exec import notify, trade_db
+
+PIP = 0.1
+VN = timezone(timedelta(hours=7))
+
+
+def _vn(ts_iso: str) -> str:
+    try:
+        t = pd.Timestamp(ts_iso)
+        t = t.tz_localize("UTC") if t.tzinfo is None else t.tz_convert("UTC")
+        return t.tz_convert(VN).strftime("%H:%M:%S %d/%m GMT+7")
+    except Exception:
+        return str(ts_iso)
+
+
+def _method_label(pip) -> str:
+    return {50.0: "PP2 scalp", 100.0: "method-100", 150.0: "PRI 150"}.get(float(pip or 0), f"TP1 {pip}")
+
+
+def _place_msg(o, sig, lag: float) -> str:
+    arrow = "🟢 BUY" if o.side == "long" else "🔴 SELL"
+    return (f"📥 <b>COPY · {arrow} XAUUSDm</b>\n"
+            f"➡️ Entry <b>{o.entry:.2f}</b> · 🛑 SL {o.sl:.2f} · 🎯 TP1 {o.tp:.2f}\n"
+            f"📦 Vol {o.volume} · {_method_label(o.tp1_pip)} (TP1 {o.tp1_pip:g}pip)\n"
+            f"🕐 từ UG {_vn(sig.get('ts',''))} · lag {lag:.0f}s")
 
 FEED = Path("data/ug/live_signals.jsonl")
 # State path is set per run-mode (live vs dry) so a dry-run can never poison the
@@ -118,6 +144,7 @@ def main() -> int:
         print("  !! LIVE order placement ENABLED !!")
 
     st = _load_state()
+    trade_db.init_db()
     now_iso = lambda: pd.Timestamp.now(tz="UTC").isoformat()
 
     while True:
@@ -170,28 +197,66 @@ def main() -> int:
                     print(f"  [{now_iso()}] (lag {lag:.1f}s signal→placed) PLACED "
                           f"{o.order_type} {args.symbol} {o.volume} "
                           f"@ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
-                    st["done"][k] = {"ticket": ticket, "placed_at": now_iso(),
-                                     "order": o.__dict__}
+                    msg_id = notify.send(_place_msg(o, sig, lag))   # → Telegram, keep id
+                    tid = trade_db.insert({
+                        "signal_ts": sig.get("ts"), "direction": o.side,
+                        "method_pip": o.tp1_pip, "order_type": o.order_type,
+                        "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
+                        "ticket": ticket, "status": "pending", "tg_msg_id": msg_id,
+                        "created_at": now_iso()})
+                    st["done"][k] = {"trade_id": tid, "ticket": ticket}
                     _save_state(st)
 
-            # 2) Manage live pendings (cancel if price reached TP1 unfilled, or expired).
+            # 2) Lifecycle management of DB-tracked trades (pending→filled→closed),
+            #    with a Telegram reply + P/L on each transition.
             live_tickets = broker.pending_tickets(args.symbol)
             if live_tickets is None:        # query FAILED — don't mistake for 'all gone'
                 print(f"  [{now_iso()}] pending query failed; skip management this cycle")
                 time.sleep(args.poll); continue
-            for k, rec in st["done"].items():
-                tk = rec.get("ticket")
-                if tk is None or rec.get("closed"):
-                    continue
-                if tk not in live_tickets:         # filled or already gone → MT5 manages SL/TP now
-                    rec["closed"] = "filled_or_gone"; _save_state(st); continue
-                o = Order(**rec["order"])
-                age_min = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(rec["placed_at"])).total_seconds() / 60
-                if should_cancel_pending(o, mid) or age_min > args.expiry_min:
-                    why = "TP1 reached unfilled" if should_cancel_pending(o, mid) else f"expired {age_min:.0f}min"
-                    if broker.cancel(tk):
-                        print(f"  [{now_iso()}] CANCEL ticket {tk} — {why}")
-                        rec["closed"] = why; _save_state(st)
+
+            for r in trade_db.open_trades():
+                tid, tk = r["id"], r["ticket"]
+                long = r["direction"] == "long"
+                if r["status"] == "pending":
+                    if tk in live_tickets:
+                        # cancel if price reached TP1 (don't chase) or order expired
+                        reached = (mid >= r["tp"]) if long else (mid <= r["tp"])
+                        age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
+                        if reached or age > args.expiry_min:
+                            why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
+                            if broker.cancel(tk):
+                                trade_db.update(tid, status="cancelled", closed_at=now_iso(), note=why)
+                                notify.send(f"🚫 <b>Hủy lệnh chờ</b> — {why}", reply_to=r["tg_msg_id"])
+                                print(f"  [{now_iso()}] CANCEL ticket {tk} — {why}")
+                    else:
+                        fi = broker.fill_info(tk)
+                        if fi == "unknown":
+                            continue          # transient history-query failure — retry next poll
+                        if fi:
+                            trade_db.update(tid, status="filled", position_id=fi["position_id"],
+                                            fill_price=fi["fill_price"], filled_at=now_iso())
+                            notify.send(f"🎯 <b>Đã khớp</b> @ {fi['fill_price']:.2f}",
+                                        reply_to=r["tg_msg_id"])
+                            print(f"  [{now_iso()}] FILLED ticket {tk} @ {fi['fill_price']:.2f}")
+                        else:
+                            trade_db.update(tid, status="cancelled", closed_at=now_iso(),
+                                            note="pending vanished")
+                            notify.send("🚫 <b>Lệnh chờ đã biến mất</b> (hủy ngoài?)",
+                                        reply_to=r["tg_msg_id"])
+                elif r["status"] == "filled":
+                    ci = broker.closed_info(r["position_id"])
+                    if ci:
+                        cp, pnl = ci["close_price"], ci["profit"]
+                        # classify by which level the close sits nearest
+                        reason = ("closed_tp" if abs(cp - r["tp"]) <= abs(cp - r["sl"])
+                                  else "closed_sl")
+                        trade_db.update(tid, status=reason, close_price=cp, profit=pnl,
+                                        closed_at=now_iso())
+                        icon = "✅ WIN" if pnl > 0 else ("❌ LOSS" if pnl < 0 else "⚪ BE")
+                        hit = "TP1" if reason == "closed_tp" else "SL"
+                        notify.send(f"{icon} — chạm {hit} @ {cp:.2f}\n"
+                                    f"💰 Lời/Lỗ: <b>{pnl:+.2f} USD</b>", reply_to=r["tg_msg_id"])
+                        print(f"  [{now_iso()}] CLOSED {hit} @ {cp:.2f} pnl {pnl:+.2f}")
         except Exception as e:
             print(f"  [{now_iso()}] loop error {e}")
         time.sleep(args.poll)

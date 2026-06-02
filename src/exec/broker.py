@@ -9,6 +9,8 @@ Only `Order`s produced by the unit-tested ug_copier_logic.decide() reach here.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from src.exec.ug_copier_logic import Order
 
 MAGIC = 770150                  # tags this copier's orders
@@ -125,6 +127,40 @@ class Mt5Broker:
             print(f"  [mt5] cancel FAILED ticket={ticket} retcode={getattr(r,'retcode',None)}")
         return ok
 
+    # ----- lifecycle tracking (fill → close + P/L) -----
+    def _deals(self, **kw):
+        frm = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        to = datetime.now(timezone.utc) + timedelta(days=1)
+        return self.mt5.history_deals_get(frm, to, **kw)
+
+    def fill_info(self, order_ticket: int):
+        """Filled → {position_id, fill_price}; confirmed-not-filled → None;
+        history query FAILED → "unknown" (so the caller doesn't misread a transient
+        failure as a cancellation)."""
+        deals = self._deals()
+        if deals is None:
+            return "unknown"                 # query failed — don't conclude anything
+        for d in deals:
+            if int(d.order) == int(order_ticket) and d.entry == self.mt5.DEAL_ENTRY_IN:
+                return {"position_id": int(d.position_id), "fill_price": float(d.price)}
+        return None
+
+    def closed_info(self, position_id: int) -> dict | None:
+        """Fully-closed position → realized profit (incl swap+commission) + last
+        close price. None if still open, partially open, or no exit deal yet."""
+        deals = self._deals(position=int(position_id))
+        if not deals:
+            return None
+        ins = [d for d in deals if d.entry == self.mt5.DEAL_ENTRY_IN]
+        outs = [d for d in deals if d.entry == self.mt5.DEAL_ENTRY_OUT]
+        if not outs:
+            return None
+        if sum(d.volume for d in outs) + 1e-9 < sum(d.volume for d in ins):
+            return None                       # only partially closed — keep tracking
+        profit = sum(d.profit + d.swap + d.commission for d in deals)
+        last_out = max(outs, key=lambda d: d.time)
+        return {"profit": float(profit), "close_price": float(last_out.price)}
+
 
 class DryRunBroker(Mt5Broker):
     """Real prices, NO order placement. Synthetic tickets so the loop can track."""
@@ -151,3 +187,9 @@ class DryRunBroker(Mt5Broker):
         self._dry_open.discard(ticket)
         print(f"  [DRY] would cancel ticket {ticket}")
         return True
+
+    def fill_info(self, order_ticket: int) -> dict | None:
+        return None              # dry-run orders never fill
+
+    def closed_info(self, position_id: int) -> dict | None:
+        return None
