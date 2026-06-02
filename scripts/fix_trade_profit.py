@@ -30,7 +30,7 @@ def main() -> int:
     c = sqlite3.connect(DB)
     rows = c.execute(
         "select id, position_id, status, profit from trades "
-        "where position_id is not None").fetchall()
+        "where position_id IS NOT NULL").fetchall()
     for tid, pos, status, old in rows:
         new = pnl_for(pos)
         if old != new:
