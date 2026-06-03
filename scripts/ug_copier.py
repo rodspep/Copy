@@ -122,6 +122,32 @@ def _last_text(n: int = 8) -> str:
     return "\n".join(out)
 
 
+_BOT_COMMANDS = [
+    ("stats", "Thống kê P/L theo từng signal"),
+    ("open", "Lệnh chờ + vị thế đang mở"),
+    ("last", "Lệnh gần nhất"),
+    ("flat", "Hủy hết lệnh CHỜ (vị thế mở không đóng)"),
+    ("pause", "Tạm dừng đặt lệnh mới"),
+    ("resume", "Chạy lại đặt lệnh"),
+    ("help", "Danh sách lệnh"),
+]
+
+
+def _register_commands(api) -> None:
+    """setMyCommands so the Telegram client shows the '/' autocomplete menu. Idempotent —
+    safe to call every startup; a fresh bot (e.g. the real-account bot) needs it once."""
+    try:
+        cmds = [{"command": c, "description": d} for c, d in _BOT_COMMANDS]
+        r = requests.post(api("setMyCommands"), json={"commands": cmds},
+                          timeout=(3.05, 5))
+        if not r.ok:
+            print(f"  [setMyCommands] {r.status_code} {r.text[:200]}")
+        else:
+            print(f"  [cmd] registered {len(cmds)} commands")
+    except Exception as e:
+        print(f"  [setMyCommands exception] {e}")
+
+
 def _command_loop(broker, symbol: str) -> None:
     """Long-poll the COPIER's own bot (separate token) → /stats /open /last /flat
     /pause /resume. No conflict with the signal bot (different token)."""
@@ -131,6 +157,11 @@ def _command_loop(broker, symbol: str) -> None:
         return
     token, chat = c
     api = lambda m: f"https://api.telegram.org/bot{token}/{m}"
+    # Register the command menu so typing "/" shows suggestions in Telegram. A new bot
+    # (e.g. the separate real-account bot) has none until setMyCommands is called. Run it
+    # in a daemon thread so a slow/unreachable Telegram never delays the start of update
+    # polling — safety commands (/pause, /flat) must be actionable immediately at startup.
+    threading.Thread(target=_register_commands, args=(api,), daemon=True).start()
     try:
         r = requests.get(api("getUpdates"), params={"timeout": 0}, timeout=20).json()
         offset = r["result"][-1]["update_id"] + 1 if r.get("result") else 0
