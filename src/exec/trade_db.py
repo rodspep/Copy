@@ -100,27 +100,50 @@ def recent(n: int = 10) -> list[sqlite3.Row]:
 
 
 def summary() -> dict:
-    """Aggregate stats overall + per method."""
+    """Aggregate stats per SIGNAL (a bracket's TP1+TP3 legs count as ONE), overall +
+    per method. Legacy single-order rows (no group_id) are each their own signal.
+
+    A signal is: 'open' if any leg is still pending/filled; else 'closed' if it has any
+    closed leg; else 'cancelled' (all legs cancelled). Win/loss is judged on the signal's
+    NET banked profit (sum of its closed legs). `pnl` is total banked across everything
+    (incl. a still-open signal's already-closed leg — it is real money)."""
     with _conn() as c:
-        rows = c.execute("SELECT * FROM trades").fetchall()
-    closed = [r for r in rows if r["status"] and r["status"].startswith("closed")]
-    wins = [r for r in closed if (r["profit"] or 0) > 0]
-    pnl = sum((r["profit"] or 0) for r in closed)
+        rows = [dict(r) for r in c.execute("SELECT * FROM trades ORDER BY id")]
+
+    groups: dict = {}
+    for r in rows:
+        key = r["group_id"] or f"single:{r['id']}"
+        groups.setdefault(key, []).append(r)
+
+    sigs = []
+    for legs in groups.values():
+        live = any((l["status"] or "") in ("pending", "filled") for l in legs)
+        closed_legs = [l for l in legs if (l["status"] or "").startswith("closed")]
+        banked = sum((l["profit"] or 0) for l in closed_legs)
+        state = "open" if live else ("closed" if closed_legs else "cancelled")
+        sigs.append({"method": legs[0]["method_pip"], "state": state, "banked": banked})
+
+    closed = [s for s in sigs if s["state"] == "closed"]
+    wins = [s for s in closed if s["banked"] > 1e-9]
+    losses = [s for s in closed if s["banked"] < -1e-9]
     by_method: dict = {}
-    for m in sorted({r["method_pip"] for r in rows if r["method_pip"] is not None}):
-        mc = [r for r in closed if r["method_pip"] == m]
-        mw = [r for r in mc if (r["profit"] or 0) > 0]
-        by_method[m] = {"closed": len(mc), "wins": len(mw),
-                        "pnl": sum((r["profit"] or 0) for r in mc)}
+    for m in sorted({s["method"] for s in sigs if s["method"] is not None}):
+        ms = [s for s in sigs if s["method"] == m]
+        mc = [s for s in ms if s["state"] == "closed"]
+        by_method[m] = {
+            "closed": len(mc),
+            "wins": sum(1 for s in mc if s["banked"] > 1e-9),
+            "open": sum(1 for s in ms if s["state"] == "open"),
+            "pnl": sum(s["banked"] for s in ms),
+        }
     return {
-        "total": len(rows),
-        "pending": sum(1 for r in rows if r["status"] == "pending"),
-        "filled": sum(1 for r in rows if r["status"] == "filled"),
-        "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
+        "signals": len(sigs),
+        "open": sum(1 for s in sigs if s["state"] == "open"),
+        "cancelled": sum(1 for s in sigs if s["state"] == "cancelled"),
         "closed": len(closed),
         "wins": len(wins),
-        "losses": len(closed) - len(wins),
+        "losses": len(losses),
         "winrate": (len(wins) / len(closed)) if closed else 0.0,
-        "pnl": pnl,
+        "pnl": sum(s["banked"] for s in sigs),
         "by_method": by_method,
     }

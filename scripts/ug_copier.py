@@ -74,14 +74,16 @@ def _paused() -> bool:
 
 def _stats_text() -> str:
     s = trade_db.summary()
-    lines = [f"📊 <b>UG Copier — Track record</b>",
-             f"Tổng: {s['total']} · chờ {s['pending']} · đang mở {s['filled']} · hủy {s['cancelled']}",
+    lines = [f"📊 <b>UG Copier — Track record</b> (tính theo signal, 1 bracket = 1 lệnh)",
+             f"Signal: {s['signals']} · đang mở {s['open']} · hủy {s['cancelled']}",
              f"Đã đóng: {s['closed']} (✅ {s['wins']} / ❌ {s['losses']})",
-             f"🎯 Win-rate: <b>{s['winrate']:.0%}</b> · 💰 P/L: <b>{s['pnl']:+.2f} USD</b>"]
+             f"🎯 Win-rate: <b>{s['winrate']:.0%}</b> · 💰 P/L đã chốt: <b>{s['pnl']:+.2f} USD</b>"]
     if s["by_method"]:
         lines.append("— theo method —")
         for m, d in s["by_method"].items():
-            lines.append(f"  TP1 {m:g}pip: {d['closed']} đóng · win {d['wins']} · {d['pnl']:+.2f} USD")
+            extra = f" · {d['open']} đang mở" if d.get("open") else ""
+            lines.append(f"  TP1 {m:g}pip: {d['closed']} đóng · win {d['wins']} · "
+                         f"{d['pnl']:+.2f} USD{extra}")
     return "\n".join(lines)
 
 
