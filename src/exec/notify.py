@@ -17,6 +17,14 @@ _API = "https://api.telegram.org/bot{t}/{m}"
 _cache: dict = {}
 
 
+def set_config(path) -> None:
+    """Point notify at a specific Telegram config (e.g. a SEPARATE bot/group for the
+    real account so real alerts never mix with demo). Clears the creds cache."""
+    global _CFG
+    _CFG = Path(path)
+    _cache.clear()
+
+
 def creds() -> tuple[str, str] | None:
     """(bot_token, chat_id) for the copier's dedicated bot, or None if not set."""
     if "tok" in _cache:

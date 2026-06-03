@@ -316,7 +316,7 @@ def main() -> int:
                          "account's P/L never mixes with demo. Empty = default (demo).")
     args = ap.parse_args()
 
-    global STATE, ACCOUNT_LABEL
+    global STATE, ACCOUNT_LABEL, PAUSE_FLAG
     from src.exec.broker import Mt5Broker, DryRunBroker
     broker = Mt5Broker(require_demo=not args.allow_real) if args.live else DryRunBroker()
     mode = "LIVE" if args.live else "DRY-RUN"
@@ -351,9 +351,22 @@ def main() -> int:
     trade_db.DB_PATH = Path(f"data/copier_trades{acct_tag}.db")
     mode_tag = ("live" if args.live else "dry") + acct_tag
     STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
+    PAUSE_FLAG = Path(f"data/ug/copier_paused_{mode_tag}.flag")   # per-account pause
     # Singleton lock (per account+mode) — a 2nd copier of the same account can't start.
     LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
     _acquire_singleton(LOCK)
+
+    # Telegram: a REAL account uses its OWN bot/group if configured, so real-money
+    # alerts never mix with demo (and a future demo+real co-run needs separate tokens —
+    # one getUpdates consumer per token). Falls back to the shared config if absent.
+    if not is_demo:
+        real_cfg = Path("configs/copier_telegram_real.json")
+        if real_cfg.exists():
+            notify.set_config(real_cfg)
+            print(f"  [notify] REAL alerts → {real_cfg.name} (separate bot/group)")
+        else:
+            print("  [notify] no copier_telegram_real.json — REAL shares the demo bot/group; "
+                  "create it (separate bot+group) to fully isolate real alerts")
 
     print(f"UG copier {mode} · {ACCOUNT_LABEL} · {args.symbol} · vol {args.volume} · "
           f"poll {args.poll}s · expiry {args.expiry_min}min · ledger {trade_db.DB_PATH.name}")

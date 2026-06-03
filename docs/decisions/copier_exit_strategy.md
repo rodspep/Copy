@@ -48,6 +48,10 @@ full Codex whole-bot review clean, you accept the risk. Then on the VPS:
 1. `stop_feeds.bat` (stops demo copier + listener).
 2. In the MT5 terminal GUI: log OUT of demo, log IN to the REAL account. Enable
    AutoTrading (and keep "disable algo trading via external Python API" UNCHECKED).
+   (Optional but recommended) create `configs/copier_telegram_real.json` with a SEPARATE
+   bot token + group so real-money alerts/commands are isolated from demo. If absent,
+   real shares the demo bot/group (still labelled [MAIN]). The bot auto-detects demo vs
+   real (trade_mode + server name) and auto-picks ledger/real_mode/pause-flag/label.
 3. `start_real.bat` — relaunches listener + the REAL copier (`run_copier_real_inner.bat`:
    `--live --allow-real --tag real --volume 0.01 --max-open 6 --expiry-min 120`).
 4. VERIFY `logs\copier.log`: `account <real#> · <server> · REAL · !! LIVE order placement
