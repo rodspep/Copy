@@ -68,13 +68,16 @@ def _acquire_singleton(path: Path) -> None:
         pass
 
 
+ACCOUNT_LABEL = "?"        # "DEMO" | "MAIN" — set in main() from the detected account
+
+
 def _paused() -> bool:
     return PAUSE_FLAG.exists()
 
 
 def _stats_text() -> str:
     s = trade_db.summary()
-    lines = [f"📊 <b>UG Copier — Track record</b> (tính theo signal, 1 bracket = 1 lệnh)",
+    lines = [f"📊 <b>UG Copier [{ACCOUNT_LABEL}] — Track record</b> (theo signal, 1 bracket = 1 lệnh)",
              f"Signal: {s['signals']} · đang mở {s['open']} · hủy {s['cancelled']}",
              f"Đã đóng: {s['closed']} (✅ {s['wins']} / ❌ {s['losses']})",
              f"🎯 Win-rate: <b>{s['winrate']:.0%}</b> · 💰 P/L đã chốt: <b>{s['pnl']:+.2f} USD</b>"]
@@ -91,7 +94,7 @@ def _open_text() -> str:
     rows = trade_db.open_trades()
     if not rows:
         return "📭 Không có lệnh đang mở/chờ."
-    out = [f"📂 <b>{len(rows)} lệnh mở/chờ</b>:"]
+    out = [f"📂 <b>[{ACCOUNT_LABEL}] {len(rows)} lệnh mở/chờ</b>:"]
     for r in rows:
         st = "⏳chờ" if r["status"] == "pending" else "📈mở"
         m = r["method_pip"]
@@ -107,7 +110,7 @@ def _last_text(n: int = 8) -> str:
         return "📭 Chưa có lệnh nào."
     icons = {"pending": "⏳", "filled": "📈", "cancelled": "🚫",
              "closed_tp": "✅", "closed_sl": "❌"}
-    out = [f"📜 <b>{len(rows)} lệnh gần nhất</b>:"]
+    out = [f"📜 <b>[{ACCOUNT_LABEL}] {len(rows)} lệnh gần nhất</b>:"]
     for r in rows:
         pl = f" {r['profit']:+.2f}$" if r["profit"] is not None else ""
         out.append(f"{icons.get(r['status'],'•')} #{r['id']} {r['direction']} "
@@ -313,35 +316,44 @@ def main() -> int:
                          "account's P/L never mixes with demo. Empty = default (demo).")
     args = ap.parse_args()
 
-    global STATE
-    suffix = f"_{args.tag}" if args.tag else ""
-    mode_tag = ("live" if args.live else "dry") + suffix
-    # Separate ledger per tag so real-money P/L is tracked apart from demo.
-    trade_db.DB_PATH = Path(f"data/copier_trades{suffix}.db")
-    STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
-
-    # Singleton lock — refuse to start if another copier of this mode is alive
-    # (a fresh heartbeat lock). Prevents two processes double-placing the same
-    # signal / bypassing the exposure cap.
-    LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
-    _acquire_singleton(LOCK)        # OS lock — a 2nd copier can't start, period
-
+    global STATE, ACCOUNT_LABEL
     from src.exec.broker import Mt5Broker, DryRunBroker
     broker = Mt5Broker(require_demo=not args.allow_real) if args.live else DryRunBroker()
     mode = "LIVE" if args.live else "DRY-RUN"
-    print(f"UG copier {mode} · {args.symbol} · vol {args.volume} · poll {args.poll}s "
-          f"· expiry {args.expiry_min}min")
-    if args.live:
-        # Safety: --live is allowed only on a DEMO account unless explicitly forced.
-        acc = broker._account_info_retry()       # retry — don't abort on a transient read
-        if acc is None:
-            raise SystemExit("ABORT: cannot read account_info")
-        is_demo = acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO
-        print(f"  account {acc.login} · {acc.server} · "
-              f"{'DEMO' if is_demo else 'REAL/CONTEST'} · balance {acc.balance}")
-        if not is_demo and not args.allow_real:
-            raise SystemExit("ABORT: --live on a non-DEMO account. Pass --allow-real to trade real money.")
-        print("  !! LIVE order placement ENABLED !!")
+
+    # AUTO-DETECT the real account → derive ledger, real-mode and label from the ACTUAL
+    # account (not from launcher flags). So real-money trades NEVER mix into the demo
+    # ledger/stats, and 100/150 are auto-skipped on a real account.
+    acc = broker._account_info_retry()
+    if args.live and acc is None:
+        raise SystemExit("ABORT: cannot read account_info")
+    is_demo = (acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO) if acc else True
+    login = int(acc.login) if acc else 0
+    if args.live and not is_demo and not args.allow_real:
+        raise SystemExit("ABORT: --live on a non-DEMO account. Pass --allow-real to trade real money.")
+    ACCOUNT_LABEL = "DEMO" if is_demo else "MAIN"
+    real_mode = not is_demo                  # auto: real account trades only the proven 50pip edge
+
+    # Auto ledger: DEMO keeps copier_trades.db; each REAL account gets its own ledger
+    # (copier_trades_real_<login>.db) so its WR/P&L is tracked from scratch, separate.
+    acct_tag = "" if is_demo else f"_real_{login}"
+    if args.tag:                             # optional manual override
+        acct_tag = f"_{args.tag}"
+    trade_db.DB_PATH = Path(f"data/copier_trades{acct_tag}.db")
+    mode_tag = ("live" if args.live else "dry") + acct_tag
+    STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
+    # Singleton lock (per account+mode) — a 2nd copier of the same account can't start.
+    LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
+    _acquire_singleton(LOCK)
+
+    print(f"UG copier {mode} · {ACCOUNT_LABEL} · {args.symbol} · vol {args.volume} · "
+          f"poll {args.poll}s · expiry {args.expiry_min}min · ledger {trade_db.DB_PATH.name}")
+    if acc:
+        print(f"  account {acc.login} · {acc.server} · {ACCOUNT_LABEL} · balance {acc.balance}")
+    if args.live and not is_demo:
+        print("  !! REAL-MONEY order placement ENABLED · only 50pip traded !!")
+    elif args.live:
+        print("  !! LIVE order placement ENABLED (demo — all methods) !!")
 
     st = _load_state()
     trade_db.init_db()
@@ -349,8 +361,9 @@ def main() -> int:
     _adopt_orphans(broker, args.symbol)        # recover any untracked magic orders/positions
     # copier's own command bot (separate token) → /stats /open /last /flat /pause
     threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
-    notify.send(f"📥 <b>UG Copier khởi động</b> — {mode} · {args.symbol} · vol "
-                f"{args.volume} · lọc TP1∈{{50,100,150}} · đang theo dõi UG.\n"
+    _filter = "50pip" if real_mode else "50/100/150"
+    notify.send(f"📥 <b>UG Copier khởi động — [{ACCOUNT_LABEL}]</b> · {mode} · {args.symbol} · "
+                f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")
 
     while True:
@@ -383,7 +396,7 @@ def main() -> int:
                     st["done"][k] = {"stale": lag, "at": now_iso()}
                     _save_state(st)        # durable: never reconsider across restart
                     continue
-                d = decide(sig, mid, volume=args.volume, real_mode=args.allow_real)
+                d = decide(sig, mid, volume=args.volume, real_mode=real_mode)
                 if d.action == "skip":
                     print(f"  [{now_iso()}] (lag {lag:.1f}s) SKIP {sig.get('direction')} — {d.reason}")
                     st["done"][k] = {"skipped": d.reason, "at": now_iso()}
