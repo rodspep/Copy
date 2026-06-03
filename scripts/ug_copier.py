@@ -408,7 +408,14 @@ def main() -> int:
             pass
     atexit.register(_on_exit)
 
-    _loss_notified = False
+    # daily-loss breaker tripped-date — PERSISTED in state so a restart same-day stays
+    # halted (a later closed win must not un-halt it).
+    _tripped_day = None
+    try:
+        if st.get("tripped_day"):
+            _tripped_day = pd.Timestamp(st["tripped_day"])
+    except Exception:
+        _tripped_day = None
     while True:
         try:
             try:                          # atomic write so a hard-kill mid-write can't tear it
@@ -419,32 +426,53 @@ def main() -> int:
                 os.replace(_hb_tmp, HEARTBEAT)
             except Exception:
                 pass
+
+            # FAIL-STOP if the terminal's account login changed mid-run (someone switched
+            # the account): never read/manage/place on the wrong account.
+            if broker.login_changed():
+                notify.send(f"🛑 <b>[{ACCOUNT_LABEL}] Account login đã ĐỔI</b> — DỪNG copier "
+                            f"để an toàn (đừng để chạy nhầm tài khoản).")
+                print(f"  [{now_iso()}] ACCOUNT LOGIN CHANGED — halting copier")
+                raise SystemExit("account login changed mid-run")
+
             px = broker.get_price(args.symbol)
             if not px:
                 print(f"  [{now_iso()}] no price for {args.symbol}; retry")
                 time.sleep(args.poll); continue
             mid = px["mid"]
 
-            # Circuit-breaker: stop NEW entries once today's NET realized P/L hits the
-            # daily-loss limit (open trades still managed). Auto-resets at the VN day roll.
+            # Circuit-breaker: once today's NET realized P/L hits the daily-loss limit,
+            # halt NEW entries for the REST OF THE DAY (STICKY — a later win does NOT
+            # un-halt; open trades keep being managed). Auto-resets at the VN day roll.
             loss_tripped = False
             if args.max_daily_loss > 0:
-                day_start = pd.Timestamp.now(tz=VN).normalize().tz_convert("UTC").isoformat()
-                dl = trade_db.realized_pnl_since(day_start)
-                loss_tripped = dl <= -args.max_daily_loss
-                if loss_tripped and not _loss_notified:
-                    notify.send(f"🛑 <b>[{ACCOUNT_LABEL}] Dừng vào lệnh mới</b> — lỗ ngày "
-                                f"{dl:+.2f} USD ≥ giới hạn {args.max_daily_loss:g}. Vẫn quản lý "
-                                f"lệnh đang mở; tự mở lại sang ngày mới.")
-                    print(f"  [{now_iso()}] DAILY-LOSS tripped: {dl:+.2f} <= -{args.max_daily_loss}")
-                    _loss_notified = True
-                elif not loss_tripped:
-                    _loss_notified = False
+                today = pd.Timestamp.now(tz=VN).normalize()
+                if _tripped_day is not None and _tripped_day == today:
+                    loss_tripped = True
+                else:
+                    dl = trade_db.realized_pnl_since(today.tz_convert("UTC").isoformat())
+                    if dl <= -args.max_daily_loss:
+                        loss_tripped = True
+                        _tripped_day = today
+                        st["tripped_day"] = today.isoformat()    # persist: sticky across restart
+                        _save_state(st)
+                        notify.send(f"🛑 <b>[{ACCOUNT_LABEL}] Dừng vào lệnh hết ngày hôm nay</b> — "
+                                    f"lỗ ngày {dl:+.2f} USD ≥ giới hạn {args.max_daily_loss:g}. "
+                                    f"Vẫn quản lý lệnh đang mở; tự mở lại sang ngày mới.")
+                        print(f"  [{now_iso()}] DAILY-LOSS tripped (sticky): {dl:+.2f}")
 
-            # 1) New signals → decide + place (skipped while paused / loss-tripped; mgmt still runs).
-            for sig in ([] if (_paused() or loss_tripped) else _read_feed()):
+            # 1) New signals → decide + place. Always read the feed so loss-halted signals
+            #    can be MARKED done (won't be placed late at the day-reset boundary). Pause
+            #    leaves them un-done (resume reconsiders); management still runs below.
+            for sig in _read_feed():
                 k = _key(sig)
                 if k in st["done"]:
+                    continue
+                if _paused():
+                    continue                      # paused → leave for resume (not marked done)
+                if loss_tripped:
+                    st["done"][k] = {"loss_halt": True, "at": now_iso()}
+                    _save_state(st)
                     continue
                 # End-to-end latency: signal's Telegram time → now (covers
                 # telegram→listener→file→this poll). Logged so we can see if the
@@ -492,40 +520,59 @@ def main() -> int:
                     # own SL/TP, so a crash leaves it safe (just possibly unmanaged).
                     st["done"][k] = {"status": "placing", "at": now_iso()}
                     _save_state(st)
-                    placed = []          # [(Order, ticket, is_market)] for legs that landed
+                    recs = []            # each landed leg, INSERTED into trade_db immediately
                     for o in d.orders:
                         is_market = o.order_type.endswith("market")
-                        ticket = (broker.place_market(args.symbol, o) if is_market
-                                  else broker.place_limit(args.symbol, o))
-                        if ticket is None:
-                            print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
-                            continue       # not retried (safety); other leg may still place
+                        if is_market:
+                            res = broker.place_market(args.symbol, o)
+                            if res is None:
+                                print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
+                                continue
+                            ticket, fill = res["position_id"], res["fill_price"]
+                        else:
+                            ticket = broker.place_limit(args.symbol, o)
+                            if ticket is None:
+                                print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
+                                continue
+                            fill = o.entry                # a limit fills AT its price
                         print(f"  [{now_iso()}] (lag {lag:.1f}s) PLACED {o.order_type} {o.leg} "
-                              f"{args.symbol} {o.volume} @ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
-                        placed.append((o, ticket, is_market))
-                    if not placed:
-                        st["done"][k] = {"status": "place_failed", "at": now_iso()}
-                        _save_state(st)
-                        continue
-                    msg_id = notify.send(_place_msg([o for o, _, _ in placed], sig, lag))
-                    recs = []
-                    for o, ticket, is_market in placed:
-                        # MARKET legs are already filled positions → record as 'filled' with
-                        # position_id (skip the pending stage). LIMIT legs start 'pending'.
+                              f"{args.symbol} {o.volume} @ {fill} sl={o.sl} tp={o.tp} ticket={ticket}")
+                        # INSERT NOW (before notify / next leg) so a crash can't leave the
+                        # bracket unmanaged: the row carries group_id → BE linkage survives.
+                        # entry = ACTUAL fill (market: real deal price; limit: its price) so
+                        # break-even moves the runner SL to the true entry. MARKET legs are
+                        # already filled positions → 'filled' + position_id; LIMIT → 'pending'.
                         rec = {"signal_ts": sig.get("ts"), "direction": o.side,
                                "method_pip": o.tp1_pip, "order_type": o.order_type,
-                               "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
-                               "ticket": ticket, "tg_msg_id": msg_id,
-                               "created_at": now_iso(), "leg": o.leg, "group_id": k}
+                               "entry": fill, "sl": o.sl, "tp": o.tp, "volume": o.volume,
+                               "ticket": ticket, "created_at": now_iso(),
+                               "leg": o.leg, "group_id": k}
                         if is_market:
                             rec.update(status="filled", position_id=ticket,
-                                       fill_price=o.entry, filled_at=now_iso())
+                                       fill_price=fill, filled_at=now_iso())
                         else:
                             rec.update(status="pending")
                         tid = trade_db.insert(rec)
-                        recs.append({"trade_id": tid, "ticket": ticket, "leg": o.leg})
-                    st["done"][k] = {"placed": recs}
+                        recs.append({"trade_id": tid, "ticket": ticket, "leg": o.leg, "order": o})
+                    if not recs:
+                        st["done"][k] = {"status": "place_failed", "at": now_iso()}
+                        _save_state(st)
+                        continue
+                    st["done"][k] = {"placed": [{"trade_id": r["trade_id"], "ticket": r["ticket"],
+                                                 "leg": r["leg"]} for r in recs]}
                     _save_state(st)
+                    # one notify for the legs that landed; backfill tg_msg_id so closes can reply.
+                    msg_id = notify.send(_place_msg([r["order"] for r in recs], sig, lag))
+                    if msg_id:
+                        for r in recs:
+                            trade_db.update(r["trade_id"], tg_msg_id=msg_id)
+
+            # Re-check the account right before management (which READS the broker and
+            # WRITES the ledger): if the login flipped since the poll-top check, skip this
+            # cycle so wrong-account reads can't drive ledger updates (next poll halts).
+            if broker.login_changed():
+                print(f"  [{now_iso()}] account changed mid-poll — skip management this cycle")
+                time.sleep(args.poll); continue
 
             # 2) Lifecycle management of DB-tracked trades (pending→filled→closed),
             #    with a Telegram reply + P/L on each transition.

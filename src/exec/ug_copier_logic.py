@@ -68,6 +68,7 @@ class Order:
     tp1_pip: float              # method identity (TP1 pip) — same for both legs
     leg: str = "tp1"            # 'tp1' (scalp) | 'tp3' (runner, SL→BE after tp1 wins)
     tp_pip: float = 0.0         # this leg's TP distance in pip from entry
+    anchor: float = 0.0         # signal anchor (mid); a MARKET fill must be at-or-better
 
 
 @dataclass(frozen=True)
@@ -179,8 +180,10 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     suffix = "market" if market else "limit"
     otype = f"{'buy' if long else 'sell'}_{suffix}"
     entry_r, sl_r = round(entry_used, 3), round(sl, 3)
+    anchor_r = round(mid, 3)
     legs = [Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
-                  tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1", tp_pip=tp1_pip)]
+                  tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1",
+                  tp_pip=tp1_pip, anchor=anchor_r)]
 
     # Runner leg to TP3 (UG's published TP3 level), if enabled + present + further than TP1.
     if RUNNER_TP3:
@@ -191,7 +194,7 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
             if beyond:
                 legs.append(Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
                                   tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
-                                  leg="tp3", tp_pip=tp3_raw))
+                                  leg="tp3", tp_pip=tp3_raw, anchor=anchor_r))
     return Decision("place", "ok", orders=tuple(legs))
 
 

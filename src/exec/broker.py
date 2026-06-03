@@ -9,6 +9,7 @@ Only `Order`s produced by the unit-tested ug_copier_logic.decide() reach here.
 """
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -18,6 +19,15 @@ MAGIC = 770150                  # tags this copier's orders
 COMMENT = "ug_copier"
 
 
+def _synced(fn):
+    """Serialize a broker method on self._lock (MT5 API not thread-safe; command-loop
+    thread + main loop call concurrently)."""
+    def wrap(self, *a, **k):
+        with self._lock:
+            return fn(self, *a, **k)
+    return wrap
+
+
 class Mt5Broker:
     def __init__(self, require_demo: bool = True):
         from src.data import mt5_feed
@@ -25,6 +35,11 @@ class Mt5Broker:
         import MetaTrader5 as mt5
         self.mt5 = mt5
         self.require_demo = require_demo
+        # Serialize ALL MT5 access: the command-loop thread (/flat, /stats, /open) calls
+        # the broker concurrently with the main trading loop; the MT5 Python API is not
+        # guaranteed thread-safe. RLock so nested calls (open_exposure→pending_tickets)
+        # don't deadlock.
+        self._lock = threading.RLock()
         acc = self._account_info_retry()
         self._login = acc.login if acc else None       # lock the startup account
 
@@ -53,6 +68,16 @@ class Mt5Broker:
             return False, f"account {acc.login} is NOT demo (require_demo)"
         return True, ""
 
+    @_synced
+    def login_changed(self) -> bool:
+        """True ONLY if the account login DEFINITELY differs from startup (not a transient
+        read failure). The main loop fail-stops on this so no read/write hits the wrong
+        account after a mid-run account switch. A transient None is NOT a change (reads
+        return None / sends fail-closed instead)."""
+        acc = self._account_info_retry()
+        return acc is not None and self._login is not None and int(acc.login) != int(self._login)
+
+    @_synced
     def get_price(self, symbol: str):
         if not self.mt5.symbol_select(symbol, True):
             return None
@@ -94,6 +119,7 @@ class Mt5Broker:
                 return int(x.ticket)
         return None
 
+    @_synced
     def open_exposure(self, symbol: str) -> int | None:
         """Authoritative concurrent exposure = our pending orders + our open
         positions. None if any query failed (caller should then NOT place)."""
@@ -105,6 +131,7 @@ class Mt5Broker:
             return None
         return len(pend) + sum(1 for p in pos if p.magic == MAGIC)
 
+    @_synced
     def place_limit(self, symbol: str, o: Order) -> int | None:
         mt5 = self.mt5
         ok, why = self._account_ok()             # re-verify account EVERY send
@@ -131,6 +158,7 @@ class Mt5Broker:
               f"{getattr(r,'comment','')} — reconciling...")
         return self._find_pending(symbol, o)
 
+    @_synced
     def place_market(self, symbol: str, o: Order) -> int | None:
         """Open a MARKET position immediately (zone-aware in-zone entry). Returns the
         position_id, or None. On an UNCLEAR send we do NOT retry (a market retry could
@@ -162,6 +190,14 @@ class Mt5Broker:
         if min_dist > 0 and (abs(price - o.sl) < min_dist or abs(o.tp - price) < min_dist):
             print(f"  [mt5] market price {price} inside stops_level dist — skip")
             return None
+        # NEVER chase: the actual execution (ask for a buy / bid for a sell) must be
+        # AT-OR-BETTER than the signal anchor. If spread pushed it past the anchor, skip
+        # (decide will re-evaluate; usually it becomes a limit-at-anchor next poll).
+        if o.anchor:
+            worse = (price > o.anchor + point) if buy else (price < o.anchor - point)
+            if worse:
+                print(f"  [mt5] market exec {price} worse than anchor {o.anchor} (spread) — skip")
+                return None
         req = {
             "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(o.volume),
             "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": float(price),
@@ -170,20 +206,46 @@ class Mt5Broker:
         }
         r = mt5.order_send(req)
         if r is not None and r.retcode == mt5.TRADE_RETCODE_DONE:
-            return int(r.order)            # for a market deal, position_id == order ticket
+            # Resolve the REAL position_id AND actual fill price from the resulting deal
+            # (don't assume position_id==order ticket; don't assume fill==requested price).
+            pid = int(r.order)
+            fill = float(getattr(r, "price", 0.0) or price)
+            deal = int(getattr(r, "deal", 0) or 0)
+            for _ in range(3):
+                if not deal:
+                    break
+                try:
+                    ds = mt5.history_deals_get(ticket=deal)
+                except Exception:
+                    ds = None
+                if ds:
+                    pid = int(ds[0].position_id)
+                    fill = float(ds[0].price)
+                    break
+                time.sleep(0.2)
+            return {"position_id": pid, "fill_price": fill}
         print(f"  [mt5] market order unclear/failed retcode={getattr(r,'retcode',None)} "
               f"{getattr(r,'comment','')} — NOT retrying (orphan recovery will adopt if it landed)")
         return None
 
+    @_synced
     def pending_tickets(self, symbol: str) -> set[int] | None:
         """Set of our pending tickets, or None if the query FAILED (so the caller
         does NOT mistake an API error for 'all orders gone')."""
+        if self.login_changed():
+            print("  [mt5] pending_tickets: account changed — returning None (fail-closed)")
+            return None
         orders = self.mt5.orders_get(symbol=symbol)
         if orders is None:
             return None
         return {int(o.ticket) for o in orders if o.magic == MAGIC}
 
+    @_synced
     def cancel(self, ticket: int) -> bool:
+        ok, why = self._account_ok()             # never manage the wrong account
+        if not ok:
+            print(f"  [mt5] BLOCKED cancel ticket={ticket} — {why}")
+            return False
         r = self.mt5.order_send({"action": self.mt5.TRADE_ACTION_REMOVE, "order": int(ticket)})
         ok = r is not None and r.retcode == self.mt5.TRADE_RETCODE_DONE
         if not ok:
@@ -196,6 +258,7 @@ class Mt5Broker:
         to = datetime.now(timezone.utc) + timedelta(days=1)
         return self.mt5.history_deals_get(frm, to, **kw)
 
+    @_synced
     def cancel_all_pendings(self, symbol: str) -> int | None:
         """Cancel every resting magic pending (the /flat command). None if query failed."""
         pend = self.pending_tickets(symbol)
@@ -203,9 +266,12 @@ class Mt5Broker:
             return None
         return sum(1 for tk in list(pend) if self.cancel(tk))
 
+    @_synced
     def list_magic(self, symbol: str) -> dict | None:
         """Our magic pendings + positions as plain dicts (for orphan recovery on
         startup). None if either query failed (caller must NOT conclude 'none')."""
+        if self.login_changed():
+            return None                      # wrong account — don't adopt its orders
         orders = self.mt5.orders_get(symbol=symbol)
         positions = self.mt5.positions_get(symbol=symbol)
         if orders is None or positions is None:
@@ -220,9 +286,14 @@ class Mt5Broker:
         return {"pendings": pend, "positions": pos,
                 "buy_limit": self.mt5.ORDER_TYPE_BUY_LIMIT, "pos_buy": self.mt5.POSITION_TYPE_BUY}
 
+    @_synced
     def modify_sl(self, position_id: int, new_sl: float) -> bool:
         """Move an OPEN position's SL (e.g. to break-even), keeping its TP. True on
         success. False if the position is gone or the broker rejects."""
+        ok, why = self._account_ok()             # never manage the wrong account
+        if not ok:
+            print(f"  [mt5] BLOCKED modify_sl pos={position_id} — {why}")
+            return False
         pos = self.mt5.positions_get(ticket=int(position_id))
         if not pos:
             print(f"  [mt5] modify_sl: position {position_id} not found (already closed?)")
@@ -237,10 +308,13 @@ class Mt5Broker:
             print(f"  [mt5] modify_sl FAILED pos={position_id} retcode={getattr(r,'retcode',None)}")
         return ok
 
+    @_synced
     def fill_info(self, order_ticket: int):
         """Filled → {position_id, fill_price}; confirmed-not-filled → None;
         history query FAILED → "unknown" (so the caller doesn't misread a transient
         failure as a cancellation)."""
+        if self.login_changed():
+            return "unknown"                 # wrong account — don't conclude anything
         deals = self._deals()
         if deals is None:
             return "unknown"                 # query failed — don't conclude anything
@@ -249,9 +323,12 @@ class Mt5Broker:
                 return {"position_id": int(d.position_id), "fill_price": float(d.price)}
         return None
 
+    @_synced
     def closed_info(self, position_id: int) -> dict | None:
         """Fully-closed position → realized profit (incl swap+commission) + last
         close price. None if still open, partially open, or no exit deal yet."""
+        if self.login_changed():
+            return None                      # wrong account — treat as 'not closed yet'
         # NOTE: history_deals_get(from, to, position=X) IGNORES the position filter
         # when dates are also given — it returns ALL deals in the window (incl. the
         # account's balance/deposit deal). That made profit = account balance, not the
@@ -288,12 +365,12 @@ class DryRunBroker(Mt5Broker):
               f"sl={o.sl} tp={o.tp} (TP1 {o.tp1_pip:g}pip) ticket~{self._fake}")
         return self._fake
 
-    def place_market(self, symbol: str, o: Order) -> int | None:
+    def place_market(self, symbol: str, o: Order) -> dict | None:
         self._fake += 1
         self._dry_open.add(self._fake)
         print(f"  [DRY] would MARKET {o.order_type} {symbol} {o.volume} @ ~{o.entry} "
               f"sl={o.sl} tp={o.tp} (TP1 {o.tp1_pip:g}pip) pos~{self._fake}")
-        return self._fake
+        return {"position_id": self._fake, "fill_price": o.entry}
 
     def pending_tickets(self, symbol: str) -> set[int] | None:
         return set(self._dry_open)            # so management/cancel logic runs in dry too
