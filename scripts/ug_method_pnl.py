@@ -53,7 +53,7 @@ def detect_offset(sigs, m1) -> int:
     return best
 
 
-def simulate(s, m1, off, expiry_min, spread_pip, mode_override=None):
+def simulate(s, m1, off, expiry_min, spread_pip, mode_override=None, chase_rule=True):
     tp1 = s.get("tps_pip", {}).get("1")
     if tp1 not in MODE_BY_TP1:
         return {"status": "filtered_tp1"}
@@ -72,8 +72,16 @@ def simulate(s, m1, off, expiry_min, spread_pip, mode_override=None):
         return {"status": "no_data"}
     px0 = m1["close"].values[i0 - 1]                  # price at signal time
 
-    # copier SKIP: must have room (entry < price < tp for long; tp < price < entry short)
-    ok = (entry < px0 < tp) if long else (tp < px0 < entry)
+    # Placement rule:
+    #  chase_rule=True  (current copier): require price BETWEEN entry and TP1 (skip if
+    #                   past TP1 — 'don't chase'), and cancel if TP1 hit before fill.
+    #  chase_rule=False (deep-limit): only require price on the fillable side of entry
+    #                   (price>entry for a buy-limit); place even if past TP1 and wait
+    #                   for the pull-back to entry. No cancel-on-TP-first.
+    if chase_rule:
+        ok = (entry < px0 < tp) if long else (tp < px0 < entry)
+    else:
+        ok = (px0 > entry) if long else (px0 < entry)
     if not ok:
         return {"status": "skip_no_room"}
 
@@ -81,15 +89,15 @@ def simulate(s, m1, off, expiry_min, spread_pip, mode_override=None):
     end = ts + pd.Timedelta(minutes=expiry_min)
     filled = False
     j = i0
-    # 1) wait for fill (or cancel: TP1 reached first, or expiry)
+    # 1) wait for fill (or cancel: TP1 reached first [chase only], or expiry)
     while j < len(m1) and tm[j] <= end.to_datetime64():
         if long:
-            if hi_a[j] >= tp:
+            if chase_rule and hi_a[j] >= tp:
                 return {"status": "cancel_tp_first", "tp1": tp1, "mode": mode}
             if lo_a[j] <= entry:
                 filled = True; break
         else:
-            if lo_a[j] <= tp:
+            if chase_rule and lo_a[j] <= tp:
                 return {"status": "cancel_tp_first", "tp1": tp1, "mode": mode}
             if hi_a[j] >= entry:
                 filled = True; break
@@ -97,19 +105,29 @@ def simulate(s, m1, off, expiry_min, spread_pip, mode_override=None):
     if not filled:
         return {"status": "expired_nofill", "tp1": tp1, "mode": mode}
 
-    # 2) resolve TP1 vs SL from fill bar onward; same-bar => SL first (conservative)
-    k = j
+    # 2) resolve TP1 vs SL. On the FILL bar, only SL is allowed (conservative): the
+    #    bar's favourable extreme may have occurred BEFORE the limit filled, so a
+    #    same-bar TP would be optimistic (Codex). TP becomes eligible from j+1.
+    def _loss():
+        move = (sl - entry) * sign
+        return {"status": "loss", "tp1": tp1, "mode": mode, "R": move / abs(entry - sl),
+                "usd": move * USD_PER_PRICE - cost * USD_PER_PRICE}
+
+    def _win():
+        move = (tp - entry) * sign
+        return {"status": "win", "tp1": tp1, "mode": mode, "R": move / abs(entry - sl),
+                "usd": move * USD_PER_PRICE - cost * USD_PER_PRICE}
+
+    if (lo_a[j] <= sl) if long else (hi_a[j] >= sl):     # SL on the fill bar
+        return _loss()
+    k = j + 1
     while k < len(m1):
-        hit_tp = hi_a[k] >= tp if long else lo_a[k] <= tp
         hit_sl = lo_a[k] <= sl if long else hi_a[k] >= sl
+        hit_tp = hi_a[k] >= tp if long else lo_a[k] <= tp
         if hit_sl:
-            move = (sl - entry) * sign
-            return {"status": "loss", "tp1": tp1, "mode": mode, "R": move / abs(entry - sl),
-                    "usd": move * USD_PER_PRICE - cost * USD_PER_PRICE}
+            return _loss()
         if hit_tp:
-            move = (tp - entry) * sign
-            return {"status": "win", "tp1": tp1, "mode": mode, "R": move / abs(entry - sl),
-                    "usd": move * USD_PER_PRICE - cost * USD_PER_PRICE}
+            return _win()
         k += 1
     return {"status": "unresolved", "tp1": tp1, "mode": mode}    # ran out of data
 
@@ -174,6 +192,24 @@ def main():
             n, fp, wr, mr, usd = stats[mode]
             tag = "  <= best $" if mode == best and n else ""
             print(f"  {mode:<6}{n:>8}{fp:>7.0f}%{wr:>7.1f}%{mr:>+9.3f}{usd:>+10.2f}{tag}")
+
+    # CHASE-RULE vs DEEP-LIMIT: does dropping 'skip if past TP1' (treat as a deep
+    # pull-back limit) help any bucket? (entry = MID, the live copier's choice)
+    print("\n=== CHASE-RULE vs DEEP-LIMIT per bucket (entry=mid) ===")
+    for tp1 in (50.0, 100.0, 150.0):
+        bucket = [s for s in sigs if s.get("tps_pip", {}).get("1") == tp1]
+        print(f"\nTP1 {int(tp1)}pip  (n={len(bucket)})")
+        print(f"  {'rule':<12}{'closed':>8}{'fill%':>8}{'WR':>8}{'meanR':>9}{'net $':>10}")
+        for label, chase in (("chase (now)", True), ("deep-limit", False)):
+            rows = [simulate(s, m1, off, expiry_min, spread_pip, mode_override="mid",
+                             chase_rule=chase) for s in bucket]
+            wins = [r for r in rows if r["status"] == "win"]
+            traded = wins + [r for r in rows if r["status"] == "loss"]
+            usd = sum(r["usd"] for r in traded)
+            wr = len(wins) / len(traded) * 100 if traded else 0
+            mr = sum(r["R"] for r in traded) / len(traded) if traded else 0
+            fp = len(traded) / len(bucket) * 100 if bucket else 0
+            print(f"  {label:<12}{len(traded):>8}{fp:>7.0f}%{wr:>7.1f}%{mr:>+9.3f}{usd:>+10.2f}")
 
 
 if __name__ == "__main__":
