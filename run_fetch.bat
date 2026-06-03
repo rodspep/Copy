@@ -6,4 +6,6 @@ REM the nested cmd quoting, which is what broke the inline version).
 cd /d C:\mt5-bot
 set MT5_SYMBOL=XAUUSDm
 set PYTHONUNBUFFERED=yes
-"C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.fetch_mt5_history --tfs M1 M5 M30 H1
+REM --bars 1000000: request deep history; the fetcher halves down on the terminal's
+REM max-bars cap, so this grabs the MAX M1/M5/M30/H1 the terminal will give (for ML training).
+"C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.fetch_mt5_history --tfs M1 M5 M30 H1 --bars 1000000
