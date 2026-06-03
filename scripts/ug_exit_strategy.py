@@ -91,7 +91,7 @@ def fill_index(s, m1, off, expiry_min):
     return None                                  # expired unfilled
 
 
-def resolve(m1, fill, legs, be_after_tp1, spread_pip):
+def resolve(m1, fill, legs, be_after_tp1, spread_pip, be_to="entry"):
     """Walk M1 from the fill bar; return (usd, R, resolved_bool). legs = list of
     (fraction, tp_pip). Adverse-first each bar (conservative)."""
     entry, sl0, sign, tps, j = fill
@@ -127,8 +127,14 @@ def resolve(m1, fill, legs, be_after_tp1, spread_pip):
             idx += 1
             if klevel == 1:
                 booked_tp1 = True
-                if be_after_tp1:
-                    stop = entry                 # move stop to breakeven
+                if be_after_tp1 and be_to == "tp1":
+                    # LOCK TP1: move the runner's stop to the TP1 level (guarantees ~TP1
+                    # profit on the runner). It sits AT the just-touched price, so we do
+                    # NOT same-bar check it (that would insta-stop); it applies from the
+                    # next bar's adverse check.
+                    stop = tp_price
+                elif be_after_tp1:               # be_to == "entry": break-even
+                    stop = entry
                     # CONSERVATIVE: if THIS bar's range also reaches breakeven, assume
                     # the pull-back to BE happened before any further extension —
                     # stop the runner at BE now, do NOT let TP2/TP3 book this same bar.
@@ -244,6 +250,13 @@ def main():
             row(name, [resolve(m1, f, legf(), be, spread_pip) for f in fills])
         for name, (tp1f, trail) in TRAIL_STRATEGIES.items():
             row(name, [resolve_trail(m1, f, tp1f, trail, spread_pip) for f in fills])
+        # runner stop: break-even (entry) vs lock-at-TP1
+        for tgt in (3, 4):
+            legs = [(0.5, 1), (0.5, tgt)]
+            row(f"50%TP1/50%TP{tgt} SL->entry",
+                [resolve(m1, f, list(legs), True, spread_pip, be_to="entry") for f in fills])
+            row(f"50%TP1/50%TP{tgt} SL->TP1",
+                [resolve(m1, f, list(legs), True, spread_pip, be_to="tp1") for f in fills])
         print()
 
 
