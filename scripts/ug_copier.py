@@ -269,6 +269,27 @@ def _key(sig: dict) -> str:
     return "|".join(str(sig.get(k)) for k in ("direction", "entry_low", "entry_high", "sl")) + f"|{tp1}"
 
 
+def _reconsider_signal(prev, lag_sec: float, block_age_sec: float, window_sec: float) -> bool:
+    """Dedup decision for a signal whose content-key already has a `st['done']` entry
+    (`prev`), or None if first-seen. Returns True to EVALUATE this signal, False to
+    suppress (dedup).
+
+    - first-seen (prev=None) → evaluate.
+    - HARD block — we placed it, or crashed mid-place (`placed` / status `placing`) →
+      suppress forever (never double-place the same levels).
+    - SOFT block — stale / skip / loss-halt / place-failed: reconsider ONLY when THIS
+      post is FRESH (lag within the window) AND the block is at least `window_sec` old.
+      UG re-posts identical entry/SL/TP hours apart as genuinely new signals, so a soft
+      block must let a later fresh re-post through; but burst re-posts seconds apart and
+      the per-poll re-reads of the same old line stay suppressed (no spam/churn/dup)."""
+    if prev is None:
+        return True
+    if prev.get("placed") or prev.get("status") == "placing":
+        return False
+    fresh = 0 <= lag_sec <= window_sec
+    return fresh and block_age_sec >= window_sec
+
+
 def _load_state() -> dict:
     if STATE.exists():
         return json.loads(STATE.read_text(encoding="utf-8"))
@@ -591,30 +612,43 @@ def main() -> int:
             #    leaves them un-done (resume reconsiders); management still runs below.
             for sig in _read_feed():
                 k = _key(sig)
-                if k in st["done"]:
-                    continue
+                # End-to-end latency (signal's Telegram post time → now: covers
+                # telegram→listener→file→this poll). Computed FIRST because the dedup
+                # re-eval gate below needs it. Logged so we can see if the copier is too
+                # slow vs how fast UG's price moves.
+                try:
+                    lag = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(sig["ts"])).total_seconds()
+                except Exception:
+                    lag = -1.0
+                # DEDUP (see _reconsider_signal): hard blocks (placed/placing) skip
+                # forever; a SOFT block (stale/skip/loss/place-failed) lets a later FRESH
+                # re-post of the same levels through (UG re-posts identical signals hours
+                # apart) — this fixes the "no notification on a re-posted signal" bug —
+                # while suppressing burst re-posts seconds apart + per-poll re-reads.
+                _window = args.max_signal_age_min * 60
+                prev = st["done"].get(k)
+                if prev is not None:
+                    try:
+                        block_age = (pd.Timestamp.now(tz="UTC")
+                                     - pd.Timestamp(prev.get("at"))).total_seconds()
+                    except Exception:
+                        block_age = 0.0
+                    if not _reconsider_signal(prev, lag, block_age, _window):
+                        continue
                 if _paused():
                     continue                      # paused → leave for resume (not marked done)
                 if loss_tripped:
                     st["done"][k] = {"loss_halt": True, "at": now_iso()}
                     _save_state(st)
                     continue
-                # End-to-end latency: signal's Telegram time → now (covers
-                # telegram→listener→file→this poll). Logged so we can see if the
-                # copier is too slow vs how fast UG's price moves.
-                try:
-                    lag = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(sig["ts"])).total_seconds()
-                except Exception:
-                    lag = -1.0
-                # STALE GUARD: UG's edge is a fresh pull-back; a signal we only see
-                # long after its post (old repost, feed backlog, key-format migration)
-                # must NOT be placed. A bad/unparseable ts (lag<0) is also untrusted.
-                # Mark done so it is never reconsidered.
+                # STALE GUARD: UG's edge is a fresh pull-back; a signal we only see long
+                # after its post (old repost, feed backlog) must NOT be placed. A bad/
+                # unparseable ts (lag<0) is also untrusted.
                 if lag < 0 or lag > args.max_signal_age_min * 60:
                     print(f"  [{now_iso()}] STALE skip {sig.get('direction')} "
                           f"(lag {lag:.0f}s > {args.max_signal_age_min:g}min) — not placing")
                     st["done"][k] = {"stale": lag, "at": now_iso()}
-                    _save_state(st)        # durable: never reconsider across restart
+                    _save_state(st)        # soft block: re-eval only on a later FRESH re-post
                     continue
                 d = decide(sig, mid, volume=args.volume, real_mode=real_mode)
                 if d.action == "skip":
