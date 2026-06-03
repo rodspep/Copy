@@ -26,6 +26,7 @@ Run (VPS, live): python -X utf8 -m scripts.ug_copier --live --symbol XAUUSDm
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
 import threading
@@ -213,6 +214,7 @@ def _place_msg(orders, sig, lag: float) -> str:
 
 FEED = Path("data/ug/live_signals.jsonl")
 PAUSE_FLAG = Path("data/ug/copier_paused.flag")
+HEARTBEAT = Path("data/ug/copier_heartbeat.json")   # per-account; refreshed each poll
 # State path is set per run-mode (live vs dry) so a dry-run can never poison the
 # live dedup/exposure record. Assigned in main().
 STATE = Path("data/ug/copier_state.json")
@@ -325,7 +327,7 @@ def main() -> int:
                          "account's P/L never mixes with demo. Empty = default (demo).")
     args = ap.parse_args()
 
-    global STATE, ACCOUNT_LABEL, PAUSE_FLAG
+    global STATE, ACCOUNT_LABEL, PAUSE_FLAG, HEARTBEAT
     from src.exec.broker import Mt5Broker, DryRunBroker
     broker = Mt5Broker(require_demo=not args.allow_real) if args.live else DryRunBroker()
     mode = "LIVE" if args.live else "DRY-RUN"
@@ -361,6 +363,7 @@ def main() -> int:
     mode_tag = ("live" if args.live else "dry") + acct_tag
     STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
     PAUSE_FLAG = Path(f"data/ug/copier_paused_{mode_tag}.flag")   # per-account pause
+    HEARTBEAT = Path(f"data/ug/copier_heartbeat_{mode_tag}.json")  # per-account liveness
     # Singleton lock (per account+mode) — a 2nd copier of the same account can't start.
     LOCK = STATE.with_name(f"copier_{mode_tag}.lock")
     _acquire_singleton(LOCK)
@@ -397,9 +400,25 @@ def main() -> int:
                 f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")
 
+    def _on_exit():                      # graceful crash / exception / Ctrl-C alert
+        try:
+            notify.send(f"⚠️ <b>[{ACCOUNT_LABEL}] UG Copier ĐÃ DỪNG</b> — tiến trình thoát. "
+                        f"Kiểm tra VPS/log. (hard-kill thì watchdog báo)")
+        except Exception:
+            pass
+    atexit.register(_on_exit)
+
     _loss_notified = False
     while True:
         try:
+            try:                          # atomic write so a hard-kill mid-write can't tear it
+                _hb_tmp = HEARTBEAT.with_suffix(".json.tmp")
+                _hb_tmp.write_text(json.dumps({"ts": now_iso(), "label": ACCOUNT_LABEL,
+                                   "pid": os.getpid(), "real": ACCOUNT_LABEL == "MAIN"}),
+                                   encoding="utf-8")
+                os.replace(_hb_tmp, HEARTBEAT)
+            except Exception:
+                pass
             px = broker.get_price(args.symbol)
             if not px:
                 print(f"  [{now_iso()}] no price for {args.symbol}; retry")
