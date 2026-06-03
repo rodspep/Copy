@@ -157,6 +157,24 @@ class FakeMt5:
                             entry=DEAL_ENTRY_IN, price=0.0, volume=0.0, profit=amount,
                             swap=0.0, commission=0.0, time=0))
 
+    def fill_pending(self, ticket, fill_price):
+        """Simulate a resting pending order FILLING: it leaves active orders and becomes a
+        POSITION (ticket == order ticket, hedging) with an IN deal. Mirrors real MT5."""
+        o = next((x for x in self._orders if x.ticket == ticket), None)
+        if o is None:
+            return
+        self._orders = [x for x in self._orders if x.ticket != ticket]
+        is_buy = o.type == ORDER_TYPE_BUY_LIMIT
+        self._positions.append(SimpleNamespace(
+            ticket=ticket, magic=o.magic,
+            type=POSITION_TYPE_BUY if is_buy else POSITION_TYPE_SELL,
+            price_open=fill_price, sl=o.sl, tp=o.tp, volume=o.volume_current, symbol="XAUUSDm"))
+        self._tk += 1
+        self._deals.append(SimpleNamespace(
+            ticket=self._tk, order=ticket, position_id=ticket, entry=DEAL_ENTRY_IN,
+            price=fill_price, volume=o.volume_current, profit=0.0, swap=0.0, commission=0.0,
+            time=5))
+
     def close_position(self, position_id, out_price, profit, volume=None):
         """Add an OUT deal that fully closes a position (for closed_info tests)."""
         p = next((x for x in self._positions if x.ticket == position_id), None)

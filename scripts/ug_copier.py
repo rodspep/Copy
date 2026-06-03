@@ -298,6 +298,88 @@ def _adopt_orphans(broker, symbol: str) -> None:
         notify.send(f"♻️ <b>Nhận lại {adopted} lệnh mồ côi</b> (chưa được theo dõi) vào quản lý.")
 
 
+def _manage_open(broker, symbol, mid, now_iso, expiry_min):
+    """Lifecycle management of DB-tracked trades over one poll: pending→fill/cancel,
+    filled→close (+P/L), then break-even of the runner. Pure orchestration over
+    trade_db + broker + notify. Returns 'skip' if the pending query failed (caller should
+    skip the rest of this cycle), else None. Extracted from the loop so it is testable
+    end-to-end (place→fill→BE→close)."""
+    live_tickets = broker.pending_tickets(symbol)
+    if live_tickets is None:        # query FAILED — don't mistake for 'all gone'
+        print(f"  [{now_iso()}] pending query failed; skip management this cycle")
+        return "skip"
+
+    opens = trade_db.open_trades()
+    # The don't-chase trigger for a whole bracket is the SCALP target (TP1), not each
+    # leg's own TP — the tp3 runner's TP is far away. Map group→TP1.
+    group_tp1 = {r["group_id"]: r["tp"] for r in opens
+                 if r["leg"] == "tp1" and r["group_id"]}
+
+    for r in opens:
+        tid, tk = r["id"], r["ticket"]
+        long = r["direction"] == "long"
+        leg = r["leg"] or "tp1"
+        if r["status"] == "pending":
+            if tk in live_tickets:
+                trig = group_tp1.get(r["group_id"], r["tp"])
+                reached = (not DEEP_LIMIT) and ((mid >= trig) if long else (mid <= trig))
+                age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
+                if reached or age > expiry_min:
+                    why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
+                    if broker.cancel(tk):
+                        trade_db.update(tid, status="cancelled", closed_at=now_iso(), note=why)
+                        notify.send(f"🚫 <b>Hủy {_leg_label(leg)}</b> — {why}", reply_to=r["tg_msg_id"])
+                        print(f"  [{now_iso()}] CANCEL {leg} ticket {tk} — {why}")
+            else:
+                fi = broker.fill_info(tk)
+                if fi == "unknown":
+                    continue          # transient query failure — retry next poll
+                if fi:
+                    # entry := ACTUAL fill (a limit can gap-fill better than its price) so
+                    # break-even later moves the runner SL to the true entry.
+                    trade_db.update(tid, status="filled", position_id=fi["position_id"],
+                                    fill_price=fi["fill_price"], entry=fi["fill_price"],
+                                    filled_at=now_iso())
+                    notify.send(f"📌 <b>Đã vào lệnh</b> ({_leg_label(leg)}) "
+                                f"@ {fi['fill_price']:.2f}", reply_to=r["tg_msg_id"])
+                    print(f"  [{now_iso()}] FILLED {leg} ticket {tk} @ {fi['fill_price']:.2f}")
+                else:
+                    trade_db.update(tid, status="cancelled", closed_at=now_iso(),
+                                    note="pending vanished")
+                    notify.send(f"🚫 <b>Lệnh chờ ({_leg_label(leg)}) đã biến mất</b> "
+                                f"(hủy ngoài?)", reply_to=r["tg_msg_id"])
+        elif r["status"] == "filled":
+            ci = broker.closed_info(r["position_id"])
+            if ci:
+                cp, pnl = ci["close_price"], ci["profit"]
+                reason = ("closed_tp" if abs(cp - r["tp"]) <= abs(cp - r["sl"]) else "closed_sl")
+                trade_db.update(tid, status=reason, close_price=cp, profit=pnl, closed_at=now_iso())
+                icon = "✅ WIN" if pnl > 0 else ("❌ LOSS" if pnl < 0 else "⚪ BE")
+                if reason == "closed_tp":
+                    hit = "TP1" if leg == "tp1" else "TP3"
+                elif abs(cp - r["entry"]) <= 0.30:
+                    hit = "hòa vốn (BE)"
+                else:
+                    hit = "SL"
+                notify.send(f"{icon} <b>{_leg_label(leg)}</b> — đóng tại {hit} @ {cp:.2f}\n"
+                            f"💰 Lời/Lỗ: <b>{pnl:+.2f} USD</b>", reply_to=r["tg_msg_id"])
+                print(f"  [{now_iso()}] CLOSED {leg} {hit} @ {cp:.2f} pnl {pnl:+.2f}")
+
+    # Break-even: any OPEN runner (tp3) whose scalp (tp1) sibling already WON → move the
+    # runner's SL to entry. Standing check (re-fetches siblings) → retries until accepted.
+    for r in opens:
+        if (r["leg"] == "tp3" and r["status"] == "filled" and r["position_id"] and r["group_id"]):
+            sibs = trade_db.siblings(r["group_id"])
+            tp1_won = any(s["leg"] == "tp1" and s["status"] == "closed_tp" for s in sibs)
+            if tp1_won and r["sl"] is not None and abs(r["sl"] - r["entry"]) > 1e-6:
+                if broker.modify_sl(r["position_id"], r["entry"]):
+                    trade_db.update(r["id"], sl=r["entry"], note="SL→BE sau TP1")
+                    notify.send("🛡️ <b>Runner TP3: SL dời về hòa vốn</b> (TP1 đã thắng)",
+                                reply_to=r["tg_msg_id"])
+                    print(f"  [{now_iso()}] BE move pos {r['position_id']} -> {r['entry']}")
+    return None
+
+
 def _read_feed() -> list[dict]:
     if not FEED.exists():
         return []
@@ -589,90 +671,9 @@ def main() -> int:
                 print(f"  [{now_iso()}] account changed mid-poll — skip management this cycle")
                 time.sleep(args.poll); continue
 
-            # 2) Lifecycle management of DB-tracked trades (pending→filled→closed),
-            #    with a Telegram reply + P/L on each transition.
-            live_tickets = broker.pending_tickets(args.symbol)
-            if live_tickets is None:        # query FAILED — don't mistake for 'all gone'
-                print(f"  [{now_iso()}] pending query failed; skip management this cycle")
+            # 2+3) Manage open trades (pending→fill/cancel, filled→close+P/L, runner BE).
+            if _manage_open(broker, args.symbol, mid, now_iso, args.expiry_min) == "skip":
                 time.sleep(args.poll); continue
-
-            opens = trade_db.open_trades()
-            # The don't-chase trigger for a whole bracket is the SCALP target (TP1),
-            # not each leg's own TP — the tp3 runner's TP is far away. Map group→TP1.
-            group_tp1 = {r["group_id"]: r["tp"] for r in opens
-                         if r["leg"] == "tp1" and r["group_id"]}
-
-            for r in opens:
-                tid, tk = r["id"], r["ticket"]
-                long = r["direction"] == "long"
-                leg = r["leg"] or "tp1"
-                if r["status"] == "pending":
-                    if tk in live_tickets:
-                        # DEEP_LIMIT: a resting pull-back limit is NOT cancelled just because
-                        # price touched TP1 — we wait for the pull-back to fill (cancel only on
-                        # expiry). Chase mode (DEEP_LIMIT=False) cancels on the group's TP1.
-                        trig = group_tp1.get(r["group_id"], r["tp"])
-                        reached = (not DEEP_LIMIT) and ((mid >= trig) if long else (mid <= trig))
-                        age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
-                        if reached or age > args.expiry_min:
-                            why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
-                            if broker.cancel(tk):
-                                trade_db.update(tid, status="cancelled", closed_at=now_iso(), note=why)
-                                notify.send(f"🚫 <b>Hủy {_leg_label(leg)}</b> — {why}", reply_to=r["tg_msg_id"])
-                                print(f"  [{now_iso()}] CANCEL {leg} ticket {tk} — {why}")
-                    else:
-                        fi = broker.fill_info(tk)
-                        if fi == "unknown":
-                            continue          # transient history-query failure — retry next poll
-                        if fi:
-                            # entry := ACTUAL fill (a limit can gap-fill better than its
-                            # price) so break-even later moves the runner SL to the true
-                            # entry, not the order price.
-                            trade_db.update(tid, status="filled", position_id=fi["position_id"],
-                                            fill_price=fi["fill_price"], entry=fi["fill_price"],
-                                            filled_at=now_iso())
-                            notify.send(f"📌 <b>Đã vào lệnh</b> ({_leg_label(leg)}) "
-                                        f"@ {fi['fill_price']:.2f}", reply_to=r["tg_msg_id"])
-                            print(f"  [{now_iso()}] FILLED {leg} ticket {tk} @ {fi['fill_price']:.2f}")
-                        else:
-                            trade_db.update(tid, status="cancelled", closed_at=now_iso(),
-                                            note="pending vanished")
-                            notify.send(f"🚫 <b>Lệnh chờ ({_leg_label(leg)}) đã biến mất</b> "
-                                        f"(hủy ngoài?)", reply_to=r["tg_msg_id"])
-                elif r["status"] == "filled":
-                    ci = broker.closed_info(r["position_id"])
-                    if ci:
-                        cp, pnl = ci["close_price"], ci["profit"]
-                        # classify by nearest level; r["sl"] reflects any BE move already saved
-                        reason = ("closed_tp" if abs(cp - r["tp"]) <= abs(cp - r["sl"])
-                                  else "closed_sl")
-                        trade_db.update(tid, status=reason, close_price=cp, profit=pnl,
-                                        closed_at=now_iso())
-                        icon = "✅ WIN" if pnl > 0 else ("❌ LOSS" if pnl < 0 else "⚪ BE")
-                        if reason == "closed_tp":
-                            hit = "TP1" if leg == "tp1" else "TP3"
-                        elif abs(cp - r["entry"]) <= 0.30:        # ~spread → break-even exit
-                            hit = "hòa vốn (BE)"
-                        else:
-                            hit = "SL"
-                        notify.send(f"{icon} <b>{_leg_label(leg)}</b> — đóng tại {hit} @ {cp:.2f}\n"
-                                    f"💰 Lời/Lỗ: <b>{pnl:+.2f} USD</b>", reply_to=r["tg_msg_id"])
-                        print(f"  [{now_iso()}] CLOSED {leg} {hit} @ {cp:.2f} pnl {pnl:+.2f}")
-
-            # 3) Break-even reconciliation: any OPEN runner (tp3) whose scalp (tp1)
-            #    sibling already WON → move the runner's SL to entry. Standing check
-            #    (re-fetches siblings fresh) so it retries until the broker accepts.
-            for r in opens:
-                if (r["leg"] == "tp3" and r["status"] == "filled"
-                        and r["position_id"] and r["group_id"]):
-                    sibs = trade_db.siblings(r["group_id"])
-                    tp1_won = any(s["leg"] == "tp1" and s["status"] == "closed_tp" for s in sibs)
-                    if tp1_won and r["sl"] is not None and abs(r["sl"] - r["entry"]) > 1e-6:
-                        if broker.modify_sl(r["position_id"], r["entry"]):
-                            trade_db.update(r["id"], sl=r["entry"], note="SL→BE sau TP1")
-                            notify.send("🛡️ <b>Runner TP3: SL dời về hòa vốn</b> (TP1 đã thắng)",
-                                        reply_to=r["tg_msg_id"])
-                            print(f"  [{now_iso()}] BE move pos {r['position_id']} -> {r['entry']}")
         except Exception as e:
             print(f"  [{now_iso()}] loop error {e}")
         time.sleep(args.poll)
