@@ -5,9 +5,9 @@ Baseline today = full exit at TP1 (0.5RR for the 50pip method). UG provides TP1.
 this asks whether holding to TP2/TP3 or scaling out + moving SL to breakeven beats it.
 
 Method (faithful + conservative):
-  - Fill exactly like the copier: limit at the per-method entry (all MID), only if at
-    signal time price has room (entry<px<TP1 for long); cancel if TP1 hit before fill
-    or after `expiry_min`. (So the SAME set of trades is compared across strategies.)
+  - Fill like the live copier (DEEP-LIMIT): place if price is on the fillable side of
+    entry (all MID), wait for the pull-back fill or `expiry_min`; no TP-first cancel.
+    (Same fill set compared across strategies.)
   - From the fill bar, walk M1. Each bar, ADVERSE side first (touch stop => close all
     remaining at stop) THEN favourable (book any TP legs reached, in ascending order).
     Same-bar ambiguity therefore always resolves against us (conservative).
@@ -74,7 +74,10 @@ def fill_index(s, m1, off, expiry_min):
     if i0 <= 0 or i0 >= len(m1):
         return None
     px0 = m1["close"].values[i0 - 1]
-    ok = (entry < px0 < tp1_price) if long else (tp1_price < px0 < entry)
+    # DEEP-LIMIT fill (matches the live copier): place if price is on the fillable side
+    # of entry (buy-limit below market), then WAIT for the pull-back to entry. No
+    # 'skip/cancel if TP1 touched first' — we are placing a limit, not chasing.
+    ok = (px0 > entry) if long else (px0 < entry)
     if not ok:
         return None
 
@@ -82,16 +85,8 @@ def fill_index(s, m1, off, expiry_min):
     end = ts + pd.Timedelta(minutes=expiry_min)
     j = i0
     while j < len(m1) and tm[j] <= end.to_datetime64():
-        if long:
-            if hi_a[j] >= tp1_price:
-                return None                      # TP1 reached before fill -> cancel
-            if lo_a[j] <= entry:
-                return (entry, sl, sign, s["tps_pip"], j)
-        else:
-            if lo_a[j] <= tp1_price:
-                return None
-            if hi_a[j] >= entry:
-                return (entry, sl, sign, s["tps_pip"], j)
+        if (lo_a[j] <= entry) if long else (hi_a[j] >= entry):
+            return (entry, sl, sign, s["tps_pip"], j)     # filled on pull-back
         j += 1
     return None                                  # expired unfilled
 
@@ -119,8 +114,10 @@ def resolve(m1, fill, legs, be_after_tp1, spread_pip):
             move += (stop - entry) * sign * remaining
             remaining = 0.0
             return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, True)
-        # 2) favourable: book any TP legs reached this bar, ascending
-        while idx < len(ladder):
+        # 2) favourable: book any TP legs reached this bar, ascending.
+        #    SUPPRESSED on the fill bar (k==j): the bar's high may have occurred BEFORE
+        #    the limit filled, so a same-bar TP would be optimistic (Codex). TP from j+1.
+        while k > j and idx < len(ladder):
             frac, tp_price, klevel = ladder[idx]
             reached = (hi_b >= tp_price) if sign > 0 else (lo_b <= tp_price)
             if not reached:
@@ -175,8 +172,10 @@ def resolve_trail(m1, fill, tp1_frac, trail_pip, spread_pip):
         if (lo_b <= stop) if long else (hi_b >= stop):
             move += (stop - entry) * sign * remaining
             return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE, move / risk, True)
+        # Favourable actions SUPPRESSED on the fill bar (k==j): its extreme may predate
+        # the limit fill, so a same-bar TP/trail would be optimistic (Codex). From j+1.
         # 2) bank the TP1 partial the first bar it is reached
-        if not booked_tp1:
+        if k > j and not booked_tp1:
             if (hi_b >= tp1_price) if long else (lo_b <= tp1_price):
                 move += (tp1_price - entry) * sign * tp1_frac
                 remaining -= tp1_frac
@@ -188,7 +187,7 @@ def resolve_trail(m1, fill, tp1_frac, trail_pip, spread_pip):
                     return (move * USD_PER_PRICE - spread_pip * PIP * USD_PER_PRICE,
                             move / risk, True)
         # 3) raise the trail from THIS bar's extreme (ratchet up only), for next bar
-        if trail_on:
+        if k > j and trail_on:
             hwm = max(hwm, hi_b) if long else min(hwm, lo_b)
             newstop = hwm - trail_pip * PIP if long else hwm + trail_pip * PIP
             if booked_tp1 and tp1_frac > 0:                              # BE floor on runner
@@ -213,9 +212,12 @@ STRATEGIES = {
     "TP1 full (now)":      (lambda: [(1.0, 1)], False),
     "TP2 full":            (lambda: [(1.0, 2)], False),
     "TP3 full":            (lambda: [(1.0, 3)], False),
+    "TP4 full":            (lambda: [(1.0, 4)], False),
     "50% TP1 / 50% TP2 +BE": (lambda: [(0.5, 1), (0.5, 2)], True),
-    "50% TP1 / 50% TP3 +BE": (lambda: [(0.5, 1), (0.5, 3)], True),
+    "50% TP1 / 50% TP3 +BE (now)": (lambda: [(0.5, 1), (0.5, 3)], True),
+    "50% TP1 / 50% TP4 +BE": (lambda: [(0.5, 1), (0.5, 4)], True),
     "1/3 TP1/TP2/TP3 +BE": (lambda: [(1/3, 1), (1/3, 2), (1/3, 3)], True),
+    "1/4 TP1/2/3/4 +BE":   (lambda: [(0.25, 1), (0.25, 2), (0.25, 3), (0.25, 4)], True),
 }
 
 
