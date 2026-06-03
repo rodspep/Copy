@@ -75,6 +75,64 @@ def test_soft_place_failed_fresh_after_window_reconsiders():
     assert cp._reconsider_signal(prev, lag_sec=2, block_age_sec=WIN + 100, window_sec=WIN) is True
 
 
+def _sig(ts, lo=4459, hi=4462, sl=4472, tp1=50, direction="short"):
+    return {"direction": direction, "entry_low": lo, "entry_high": hi, "sl": sl,
+            "ts": ts, "tps_pip": {1: tp1, 2: 100, 3: 150}}
+
+
+def test_freshest_per_key_collapses_old_before_fresh():
+    # The Codex finding: feed in arrival order has an OLD same-key line before a FRESH
+    # re-post. _freshest_per_key must yield only the FRESH one (so the old line can't
+    # stale-mark the key and suppress the fresh re-post).
+    old = _sig("2026-06-03T12:17:18+00:00")
+    fresh = _sig("2026-06-03T12:46:30+00:00")
+    out = cp._freshest_per_key([old, fresh])           # file order: old first
+    assert len(out) == 1 and out[0]["ts"] == fresh["ts"]
+
+
+def test_freshest_per_key_keeps_distinct_keys():
+    a = _sig("2026-06-03T12:00:00+00:00", lo=4459, hi=4462, sl=4472)
+    b = _sig("2026-06-03T12:01:00+00:00", lo=4400, hi=4403, sl=4413)   # different levels
+    out = cp._freshest_per_key([a, b])
+    assert len(out) == 2
+
+
+def test_freshest_per_key_orders_by_selected_line_not_first_seen():
+    # [old A, distinct B, fresh re-post A]: collapse must keep fresh A + B, and process B
+    # BEFORE A (A's SELECTED line is the 12:46 repost at index 2, after B at index 1) — so a
+    # later re-post can't pre-empt an earlier distinct signal for max-open capacity.
+    old_a = _sig("2026-06-03T12:00:00+00:00", lo=4459, hi=4462, sl=4472)
+    b = _sig("2026-06-03T12:30:00+00:00", lo=4400, hi=4403, sl=4413)
+    fresh_a = _sig("2026-06-03T12:46:00+00:00", lo=4459, hi=4462, sl=4472)
+    out = cp._freshest_per_key([old_a, b, fresh_a])
+    assert len(out) == 2
+    assert out[0]["ts"] == b["ts"]                     # B first (selected index 1)
+    assert out[1]["ts"] == fresh_a["ts"]               # fresh A second (selected index 2)
+
+
+def test_freshest_per_key_bad_ts_prefers_later():
+    a = _sig("garbage-ts")
+    b = _sig("also-bad")
+    out = cp._freshest_per_key([a, b])                 # unparseable → later (file order) wins
+    assert len(out) == 1 and out[0] is b
+
+
+def test_incident_891s_stale_not_reconsidered_with_tight_window():
+    # THE REAL INCIDENT (2min window): a place_failed signal (AutoTrading off) was
+    # reconsidered on restart when block_age crossed the window while lag was still under
+    # the OLD loose 15min window → placed 891s late ("chắc chắn lỗ"). With a 2min window
+    # (120s), lag 891s is NOT fresh → suppressed, never placed stale.
+    prev = {"status": "place_failed", "at": "2026-06-03T12:17:07+00:00"}
+    assert cp._reconsider_signal(prev, lag_sec=891, block_age_sec=902, window_sec=120) is False
+
+
+def test_incident_fresh_repost_after_tight_window_still_places():
+    # The legit fresh re-post (same levels, ~29min later, lag ~3s) MUST still reconsider
+    # → place, with the tight 2min window.
+    prev = {"status": "place_failed", "at": "2026-06-03T12:17:07+00:00"}
+    assert cp._reconsider_signal(prev, lag_sec=3, block_age_sec=29 * 60, window_sec=120) is True
+
+
 def test_fresh_at_exact_window_boundary_reconsiders():
     # lag == window is still "fresh" (<=), block_age == window is "expired" (>=)
     prev = {"skipped": "voided", "at": "x"}

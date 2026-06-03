@@ -269,6 +269,30 @@ def _key(sig: dict) -> str:
     return "|".join(str(sig.get(k)) for k in ("direction", "entry_low", "entry_high", "sl")) + f"|{tp1}"
 
 
+def _freshest_per_key(sigs: list) -> list:
+    """Collapse a feed list to the FRESHEST (max ts) signal per dedup-key. UG re-posts the
+    same signal many times and the feed keeps every copy; processing an old duplicate before
+    a fresh re-post (file = arrival order) would stale-mark the key and reset its dedup
+    timestamp, suppressing the fresh one. Returns one signal per key (the most recent),
+    preserving first-seen key order."""
+    out: dict = {}                           # key -> (selected_index, sig)
+    for i, s in enumerate(sigs):
+        k = _key(s)
+        prev = out.get(k)
+        if prev is None:
+            out[k] = (i, s)
+            continue
+        try:
+            newer = pd.Timestamp(s.get("ts")) >= pd.Timestamp(prev[1].get("ts"))
+        except Exception:
+            newer = True                     # unparseable ts → prefer the later (file order)
+        if newer:
+            out[k] = (i, s)
+    # Process in the order the SELECTED (freshest) lines appear in the feed — so an earlier
+    # distinct signal isn't pre-empted (e.g. for max-open capacity) by a later key's re-post.
+    return [s for _, s in sorted(out.values(), key=lambda t: t[0])]
+
+
 def _reconsider_signal(prev, lag_sec: float, block_age_sec: float, window_sec: float) -> bool:
     """Dedup decision for a signal whose content-key already has a `st['done']` entry
     (`prev`), or None if first-seen. Returns True to EVALUATE this signal, False to
@@ -468,9 +492,12 @@ def main() -> int:
                     help="circuit-breaker: stop NEW entries once today's NET realized P/L "
                          "<= -N USD (0=off). Open trades keep being managed; auto-resets "
                          "at the next VN day.")
-    ap.add_argument("--max-signal-age-min", type=float, default=15.0,
-                    help="skip signals older than N minutes (UG edge is fresh; guards "
-                         "against stale reposts / feed backlog being placed late)")
+    ap.add_argument("--max-signal-age-min", type=float, default=2.0,
+                    help="skip signals older than N minutes (UG edge is a FRESH pull-back; "
+                         "normal lag is ~2s, so 2min rejects late/stale entries — incl. a "
+                         "soft-blocked signal reconsidered late on restart — that 'chắc chắn "
+                         "lỗ'. Also the dedup re-eval window: a same-levels re-post is 'new' "
+                         "only after this long).")
     ap.add_argument("--allow-real", action="store_true",
                     help="permit --live on a REAL account (default: live allowed on DEMO only)")
     ap.add_argument("--tag", default="",
@@ -615,7 +642,11 @@ def main() -> int:
             # 1) New signals → decide + place. Always read the feed so loss-halted signals
             #    can be MARKED done (won't be placed late at the day-reset boundary). Pause
             #    leaves them un-done (resume reconsiders); management still runs below.
-            for sig in _read_feed():
+            # Collapse to the FRESHEST line per dedup-key this poll (see _freshest_per_key):
+            # UG re-posts the same signal repeatedly and the feed keeps every copy; processing
+            # an OLD duplicate before a fresh one would stale-mark the key and suppress the
+            # genuinely fresh re-post. Always act on the most recent instance of each key.
+            for sig in _freshest_per_key(_read_feed()):
                 k = _key(sig)
                 # End-to-end latency (signal's Telegram post time → now: covers
                 # telegram→listener→file→this poll). Computed FIRST because the dedup

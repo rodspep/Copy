@@ -14,5 +14,8 @@ REM  Daily-loss circuit-breaker DISABLED (no --max-daily-loss → default 0 = of
 REM  small amount is deposited (not full capital) and 0.02/signal risk is acceptable, so
 REM  no daily-loss cap is needed for now. To re-enable, append e.g. --max-daily-loss 70
 REM  (stops NEW entries once today's NET realized P/L <= -70 USD; ~4-5%% of equity).
+REM  --max-signal-age-min 2: only place if the signal is < 2 min old (lag = UG-post →
+REM  bot). A scalp entered late is "chắc chắn lỗ"; this also stops a soft-blocked signal
+REM  from being re-placed stale on a restart. Tune tighter/looser to taste.
 "C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.ug_copier --live --allow-real ^
-  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 120 --volume 0.01
+  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 120 --volume 0.01 --max-signal-age-min 2
