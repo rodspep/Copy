@@ -10,5 +10,7 @@ REM  expiry 120min. Start SMALL; scale only after real trading proves out.
 REM ===========================================================================
 cd /d C:\mt5-bot
 set PYTHONUNBUFFERED=yes
+REM  --max-daily-loss 70: stop NEW entries after ~-$70 net realized in a day (~3 bad
+REM  signals, ~4.6%% of a $1500 account). TUNE to your real balance (≈4-5%% of equity).
 "C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.ug_copier --live --allow-real ^
-  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 120 --volume 0.01
+  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 120 --volume 0.01 --max-daily-loss 70

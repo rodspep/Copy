@@ -85,6 +85,16 @@ def open_trades() -> list[sqlite3.Row]:
                          "ORDER BY id").fetchall()
 
 
+def realized_pnl_since(iso_ts: str) -> float:
+    """NET realized P/L (sum profit of closed legs) with closed_at >= iso_ts. Used by
+    the daily-loss circuit-breaker. Lexicographic compare is valid for ISO-8601 UTC."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT profit FROM trades WHERE status LIKE 'closed%' "
+            "AND closed_at IS NOT NULL AND closed_at >= ?", (iso_ts,)).fetchall()
+    return sum((r["profit"] or 0) for r in rows)
+
+
 def siblings(group_id: str) -> list[sqlite3.Row]:
     """All legs sharing a group_id (the two bracket legs of one signal)."""
     if not group_id:

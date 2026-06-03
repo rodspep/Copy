@@ -311,6 +311,10 @@ def main() -> int:
     ap.add_argument("--poll", type=int, default=30)
     ap.add_argument("--expiry-min", type=int, default=240, help="cancel unfilled pending after N min")
     ap.add_argument("--max-open", type=int, default=5, help="hard cap on concurrent placed orders")
+    ap.add_argument("--max-daily-loss", type=float, default=0.0,
+                    help="circuit-breaker: stop NEW entries once today's NET realized P/L "
+                         "<= -N USD (0=off). Open trades keep being managed; auto-resets "
+                         "at the next VN day.")
     ap.add_argument("--max-signal-age-min", type=float, default=15.0,
                     help="skip signals older than N minutes (UG edge is fresh; guards "
                          "against stale reposts / feed backlog being placed late)")
@@ -393,6 +397,7 @@ def main() -> int:
                 f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")
 
+    _loss_notified = False
     while True:
         try:
             px = broker.get_price(args.symbol)
@@ -401,8 +406,24 @@ def main() -> int:
                 time.sleep(args.poll); continue
             mid = px["mid"]
 
-            # 1) New signals → decide + place (skipped while paused; management still runs).
-            for sig in ([] if _paused() else _read_feed()):
+            # Circuit-breaker: stop NEW entries once today's NET realized P/L hits the
+            # daily-loss limit (open trades still managed). Auto-resets at the VN day roll.
+            loss_tripped = False
+            if args.max_daily_loss > 0:
+                day_start = pd.Timestamp.now(tz=VN).normalize().tz_convert("UTC").isoformat()
+                dl = trade_db.realized_pnl_since(day_start)
+                loss_tripped = dl <= -args.max_daily_loss
+                if loss_tripped and not _loss_notified:
+                    notify.send(f"🛑 <b>[{ACCOUNT_LABEL}] Dừng vào lệnh mới</b> — lỗ ngày "
+                                f"{dl:+.2f} USD ≥ giới hạn {args.max_daily_loss:g}. Vẫn quản lý "
+                                f"lệnh đang mở; tự mở lại sang ngày mới.")
+                    print(f"  [{now_iso()}] DAILY-LOSS tripped: {dl:+.2f} <= -{args.max_daily_loss}")
+                    _loss_notified = True
+                elif not loss_tripped:
+                    _loss_notified = False
+
+            # 1) New signals → decide + place (skipped while paused / loss-tripped; mgmt still runs).
+            for sig in ([] if (_paused() or loss_tripped) else _read_feed()):
                 k = _key(sig)
                 if k in st["done"]:
                     continue
