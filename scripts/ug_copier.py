@@ -37,7 +37,7 @@ import requests
 
 import pandas as pd
 
-from src.exec.ug_copier_logic import decide
+from src.exec.ug_copier_logic import decide, DEEP_LIMIT
 from src.exec import notify, trade_db
 
 PIP = 0.1
@@ -328,6 +328,16 @@ def main() -> int:
                 if d.action == "skip":
                     print(f"  [{now_iso()}] (lag {lag:.1f}s) SKIP {sig.get('direction')} — {d.reason}")
                     st["done"][k] = {"skipped": d.reason, "at": now_iso()}
+                    _save_state(st)        # durable: skip-notify fires once, not per restart
+                    # Notify skips ONLY for the proven 50pip edge (low volume of skips
+                    # under deep-limit) so you see the bot saw it + why; other methods stay quiet.
+                    _tps = sig.get("tps_pip") if isinstance(sig.get("tps_pip"), dict) else {}
+                    try:
+                        _tp1 = float(_tps.get(1) or _tps.get("1") or 0)
+                    except (TypeError, ValueError):
+                        _tp1 = 0.0
+                    if _tp1 == 50.0:
+                        notify.send(f"👀 <b>Bỏ qua signal 50pip</b> ({sig.get('direction')}) — {d.reason}")
                 elif (exp := broker.open_exposure(args.symbol)) is None:
                     print(f"  [{now_iso()}] HOLD {sig.get('direction')} — exposure unknown "
                           f"(broker query failed); not placing this cycle")
@@ -388,9 +398,11 @@ def main() -> int:
                 leg = r["leg"] or "tp1"
                 if r["status"] == "pending":
                     if tk in live_tickets:
-                        # cancel if price reached the GROUP's TP1 (don't chase) or expired
+                        # DEEP_LIMIT: a resting pull-back limit is NOT cancelled just because
+                        # price touched TP1 — we wait for the pull-back to fill (cancel only on
+                        # expiry). Chase mode (DEEP_LIMIT=False) cancels on the group's TP1.
                         trig = group_tp1.get(r["group_id"], r["tp"])
-                        reached = (mid >= trig) if long else (mid <= trig)
+                        reached = (not DEEP_LIMIT) and ((mid >= trig) if long else (mid <= trig))
                         age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
                         if reached or age > args.expiry_min:
                             why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"

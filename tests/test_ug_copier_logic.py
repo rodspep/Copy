@@ -68,11 +68,19 @@ def test_real_mode_skips_observe_only():
     assert decide(_buy(tp1=150), 4465, real_mode=True).action == "skip"
 
 
-def test_skip_if_price_past_tp1():
-    # BUY (150→mid) entry 4463, TP1 4478. Price already 4480 → move done → skip.
-    assert decide(_buy(tp1=150), current_price=4480).action == "skip"
-    # SELL (150→mid) entry 4553.5, TP1 4538.5. Price already 4538 → skip.
-    assert decide(_sell(tp1=150), current_price=4538).action == "skip"
+def test_deep_limit_places_even_past_tp1(monkeypatch):
+    import src.exec.ug_copier_logic as L
+    monkeypatch.setattr(L, "DEEP_LIMIT", True)
+    # price past TP1 but still on the fillable side of entry → place + wait for pull-back
+    assert L.decide(_buy(tp1=150), current_price=4480).action == "place"   # 4480 > entry 4463
+    assert L.decide(_sell(tp1=150), current_price=4538).action == "place"  # 4538 < entry 4553.5
+
+
+def test_chase_mode_skips_past_tp1(monkeypatch):
+    import src.exec.ug_copier_logic as L
+    monkeypatch.setattr(L, "DEEP_LIMIT", False)
+    assert L.decide(_buy(tp1=150), current_price=4480).action == "skip"
+    assert L.decide(_sell(tp1=150), current_price=4538).action == "skip"
 
 
 def test_place_if_price_between_entry_and_tp1():

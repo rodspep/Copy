@@ -11,8 +11,10 @@ UG signal geometry (decoded — see docs/decisions/ug_logic_decode.md):
   - TP1 = 50 pip (PP2 scalp), entry MID, is the ONLY proven edge. TP1 ∈ {100, 150}
     are kept ON DEMO purely for OBSERVATION (gather comparison data) — NOT promoted
     to real money until they show an edge. See ENTRY_MODE_BY_TP1 below.
-  - If price has ALREADY run to/past TP1, the move is done → skip (UG's own
-    "nếu giá đã chạy đến TP1, KHÔNG vào").
+  - Placement is a pull-back LIMIT: place when price is on the fillable side of entry
+    and WAIT for the pull-back. With DEEP_LIMIT=True we place even if price already
+    passed TP1 (it's a limit, not a chase); DEEP_LIMIT=False restores the old
+    "skip if price ran to TP1" chase behaviour. See DEEP_LIMIT below.
 """
 from __future__ import annotations
 
@@ -45,6 +47,14 @@ ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 # natively; the copier only moves the runner's SL to BE after the TP1 leg closes.
 # Kill-switch: set RUNNER_TP3=False to revert to a single TP1-full order.
 RUNNER_TP3 = True
+
+# DEEP_LIMIT: place a pull-back LIMIT whenever price is on the fillable side of entry
+# and WAIT for the pull-back — do NOT skip just because price already passed TP1.
+# Verified on the full UG history (scripts/ug_method_pnl.py, Codex-reviewed): the old
+# 'don't chase / skip if past TP1' rule discarded ~60% of the 50pip edge (38%→83% fill,
+# +$30.90→+$115.30 in-sample). UG's 'don't chase' is for MARKET entries; we use limits.
+# Forward-testing on demo. Set False to revert to the conservative chase behaviour.
+DEEP_LIMIT = True
 
 
 @dataclass(frozen=True)
@@ -135,21 +145,23 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
        (direction == "short" and not (sl > entry > tp)):
         return Decision("skip", f"bad geometry: entry={entry} sl={sl} tp={tp}")
 
-    # Price must sit BETWEEN the limit entry and TP1 for a valid pull-back limit:
-    #  - long: entry < price < tp  (buy-limit rests below market; TP1 not yet hit)
-    #  - short: tp < price < entry
-    # price past TP1 → move done (don't chase); price already beyond entry → the
-    # pull-back already triggered / limit would be on the wrong side of market.
+    # Placement validity for a pull-back LIMIT:
+    #  - The limit must rest on the fillable side of market: buy-limit BELOW market
+    #    (price > entry), sell-limit ABOVE market (price < entry). Else the "pull-back"
+    #    already triggered or the limit would be wrong-side → skip.
+    #  - DEEP_LIMIT=True: that's the ONLY requirement — we place and wait for the
+    #    pull-back even if price already passed TP1 (it's a limit, not a chase).
+    #  - DEEP_LIMIT=False (chase): additionally skip if price already reached TP1.
     if direction == "long":
-        if current_price >= tp:
-            return Decision("skip", f"price {current_price} at/through TP1 {tp}")
         if current_price <= entry:
-            return Decision("skip", f"price {current_price} already at/below entry {entry}")
-    else:
-        if current_price <= tp:
+            return Decision("skip", f"price {current_price} at/below entry {entry} (no pull-back room)")
+        if not DEEP_LIMIT and current_price >= tp:
             return Decision("skip", f"price {current_price} at/through TP1 {tp}")
+    else:
         if current_price >= entry:
-            return Decision("skip", f"price {current_price} already at/above entry {entry}")
+            return Decision("skip", f"price {current_price} at/above entry {entry} (no pull-back room)")
+        if not DEEP_LIMIT and current_price <= tp:
+            return Decision("skip", f"price {current_price} at/through TP1 {tp}")
 
     entry_r, sl_r = round(entry, 3), round(sl, 3)
     leg_tp1 = Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
