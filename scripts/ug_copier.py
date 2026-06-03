@@ -177,6 +177,12 @@ def _method_label(pip) -> str:
     return {50.0: "PP2 scalp", 100.0: "method-100", 150.0: "PRI 150"}.get(float(pip or 0), f"TP1 {pip}")
 
 
+def _leg_label(leg) -> str:
+    """Human label for a bracket leg in notifications ('khớp tp1' read like 'hit TP1';
+    this disambiguates: it's the leg that AIMS for that TP)."""
+    return {"tp1": "chân 1 · chốt TP1", "tp3": "chân 2 · runner TP3"}.get(leg or "tp1", str(leg))
+
+
 def _place_msg(orders, sig, lag: float) -> str:
     o = orders[0]
     arrow = "🟢 BUY" if o.side == "long" else "🔴 SELL"
@@ -388,7 +394,7 @@ def main() -> int:
                             why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
                             if broker.cancel(tk):
                                 trade_db.update(tid, status="cancelled", closed_at=now_iso(), note=why)
-                                notify.send(f"🚫 <b>Hủy {leg}</b> — {why}", reply_to=r["tg_msg_id"])
+                                notify.send(f"🚫 <b>Hủy {_leg_label(leg)}</b> — {why}", reply_to=r["tg_msg_id"])
                                 print(f"  [{now_iso()}] CANCEL {leg} ticket {tk} — {why}")
                     else:
                         fi = broker.fill_info(tk)
@@ -397,14 +403,14 @@ def main() -> int:
                         if fi:
                             trade_db.update(tid, status="filled", position_id=fi["position_id"],
                                             fill_price=fi["fill_price"], filled_at=now_iso())
-                            notify.send(f"🎯 <b>Đã khớp {leg}</b> @ {fi['fill_price']:.2f}",
-                                        reply_to=r["tg_msg_id"])
+                            notify.send(f"📌 <b>Đã vào lệnh</b> ({_leg_label(leg)}) "
+                                        f"@ {fi['fill_price']:.2f}", reply_to=r["tg_msg_id"])
                             print(f"  [{now_iso()}] FILLED {leg} ticket {tk} @ {fi['fill_price']:.2f}")
                         else:
                             trade_db.update(tid, status="cancelled", closed_at=now_iso(),
                                             note="pending vanished")
-                            notify.send(f"🚫 <b>Lệnh chờ {leg} đã biến mất</b> (hủy ngoài?)",
-                                        reply_to=r["tg_msg_id"])
+                            notify.send(f"🚫 <b>Lệnh chờ ({_leg_label(leg)}) đã biến mất</b> "
+                                        f"(hủy ngoài?)", reply_to=r["tg_msg_id"])
                 elif r["status"] == "filled":
                     ci = broker.closed_info(r["position_id"])
                     if ci:
@@ -421,7 +427,7 @@ def main() -> int:
                             hit = "hòa vốn (BE)"
                         else:
                             hit = "SL"
-                        notify.send(f"{icon} <b>{leg}</b> — chạm {hit} @ {cp:.2f}\n"
+                        notify.send(f"{icon} <b>{_leg_label(leg)}</b> — đóng tại {hit} @ {cp:.2f}\n"
                                     f"💰 Lời/Lỗ: <b>{pnl:+.2f} USD</b>", reply_to=r["tg_msg_id"])
                         print(f"  [{now_iso()}] CLOSED {leg} {hit} @ {cp:.2f} pnl {pnl:+.2f}")
 
