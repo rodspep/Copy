@@ -42,6 +42,15 @@ class Mt5Broker:
         self._lock = threading.RLock()
         acc = self._account_info_retry()
         self._login = acc.login if acc else None       # lock the startup account
+        # Reason string for the most recent FAILED place_limit/place_market (None on
+        # success). The copier reads it to send ONE Telegram alert when a placement
+        # fails (e.g. retcode 10027 AutoTrading off, no margin) instead of failing silently.
+        self.last_place_error: str | None = None
+        # True when the last failure was a TRANSIENT/price-dependent no-send skip (no tick,
+        # price moved off SL/TP side, inside stops_level, exec worse than anchor) — the
+        # copier should re-evaluate next poll, NOT alert or terminally abandon the signal.
+        # False = HARD failure (account blocked, stops geometry, order_send reject) → alert.
+        self.last_place_retryable: bool = False
 
     def _account_info_retry(self, tries: int = 3):
         """account_info() with a few quick retries — a transient None (terminal busy)
@@ -134,12 +143,16 @@ class Mt5Broker:
     @_synced
     def place_limit(self, symbol: str, o: Order) -> int | None:
         mt5 = self.mt5
+        self.last_place_error = None
+        self.last_place_retryable = False        # limit failures are all HARD (geometry/reject)
         ok, why = self._account_ok()             # re-verify account EVERY send
         if not ok:
             print(f"  [mt5] BLOCKED place_limit — {why}")
+            self.last_place_error = f"BLOCKED: {why}"
             return None
         if not self._stops_ok(symbol, o):
             print(f"  [mt5] SL/TP too close to entry (stops_level) — reject {o.entry}")
+            self.last_place_error = "SL/TP too close to entry (stops_level)"
             return None
         otype = mt5.ORDER_TYPE_BUY_LIMIT if o.order_type == "buy_limit" else mt5.ORDER_TYPE_SELL_LIMIT
         req = {
@@ -156,7 +169,11 @@ class Mt5Broker:
         # pendings before declaring failure (avoids an unmanaged orphan).
         print(f"  [mt5] order_send unclear retcode={getattr(r,'retcode',None)} "
               f"{getattr(r,'comment','')} — reconciling...")
-        return self._find_pending(symbol, o)
+        found = self._find_pending(symbol, o)
+        if found is None:                        # genuine failure → record why for the alert
+            self.last_place_error = (f"retcode={getattr(r,'retcode',None)} "
+                                     f"{getattr(r,'comment','') or ''}".strip())
+        return found
 
     @_synced
     def place_market(self, symbol: str, o: Order) -> int | None:
@@ -164,16 +181,22 @@ class Mt5Broker:
         position_id, or None. On an UNCLEAR send we do NOT retry (a market retry could
         double-open); orphan recovery on next startup adopts any position that did land."""
         mt5 = self.mt5
+        self.last_place_error = None
+        self.last_place_retryable = False
         ok, why = self._account_ok()
         if not ok:
             print(f"  [mt5] BLOCKED place_market — {why}")
+            self.last_place_error = f"BLOCKED: {why}"
             return None
         if not self._stops_ok(symbol, o):
             print(f"  [mt5] SL/TP too close to price (stops_level) — reject market {o.entry}")
+            self.last_place_error = "SL/TP too close to price (stops_level)"
             return None
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
             print("  [mt5] no tick for market order — skip")
+            self.last_place_error = "no tick for market order"
+            self.last_place_retryable = True
             return None
         buy = o.order_type == "buy_market"
         price = tick.ask if buy else tick.bid
@@ -186,9 +209,13 @@ class Mt5Broker:
         good_side = (o.sl < price < o.tp) if buy else (o.sl > price > o.tp)
         if not good_side:
             print(f"  [mt5] market price {price} not between SL {o.sl} and TP {o.tp} — skip")
+            self.last_place_error = f"market price {price} not between SL/TP"
+            self.last_place_retryable = True
             return None
         if min_dist > 0 and (abs(price - o.sl) < min_dist or abs(o.tp - price) < min_dist):
             print(f"  [mt5] market price {price} inside stops_level dist — skip")
+            self.last_place_error = f"market price {price} inside stops_level"
+            self.last_place_retryable = True
             return None
         # NEVER chase: the actual execution (ask for a buy / bid for a sell) must be
         # AT-OR-BETTER than the signal anchor. If spread pushed it past the anchor, skip
@@ -197,6 +224,8 @@ class Mt5Broker:
             worse = (price > o.anchor + point) if buy else (price < o.anchor - point)
             if worse:
                 print(f"  [mt5] market exec {price} worse than anchor {o.anchor} (spread) — skip")
+                self.last_place_error = f"market exec {price} worse than anchor {o.anchor} (spread)"
+                self.last_place_retryable = True
                 return None
         req = {
             "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(o.volume),
@@ -226,6 +255,8 @@ class Mt5Broker:
             return {"position_id": pid, "fill_price": fill}
         print(f"  [mt5] market order unclear/failed retcode={getattr(r,'retcode',None)} "
               f"{getattr(r,'comment','')} — NOT retrying (orphan recovery will adopt if it landed)")
+        self.last_place_error = (f"retcode={getattr(r,'retcode',None)} "
+                                 f"{getattr(r,'comment','') or ''}".strip())
         return None
 
     @_synced

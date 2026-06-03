@@ -24,6 +24,13 @@ def test_placed_block_never_reconsiders():
     assert cp._reconsider_signal(prev, lag_sec=2, block_age_sec=99999, window_sec=WIN) is False
 
 
+def test_placed_empty_list_still_hard_block():
+    # all legs reconciled to already-tracked tickets → {"placed": []} (falsy!) must STILL
+    # be a hard block by key presence, not be reconsidered as a soft block.
+    prev = {"placed": []}
+    assert cp._reconsider_signal(prev, lag_sec=2, block_age_sec=WIN + 1, window_sec=WIN) is False
+
+
 def test_placing_block_never_reconsiders():
     # crashed mid-place: some legs may have landed → must not double-place
     prev = {"status": "placing", "at": "2026-06-03T00:00:00+00:00"}

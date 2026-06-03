@@ -284,7 +284,10 @@ def _reconsider_signal(prev, lag_sec: float, block_age_sec: float, window_sec: f
       the per-poll re-reads of the same old line stay suppressed (no spam/churn/dup)."""
     if prev is None:
         return True
-    if prev.get("placed") or prev.get("status") == "placing":
+    # HARD block by KEY PRESENCE (not truthiness): a placement records a "placed" key —
+    # which may be an empty list when every leg reconciled to an already-tracked ticket —
+    # and "placing" is the crash-safety pre-mark. Either → never re-place these levels.
+    if "placed" in prev or prev.get("status") == "placing":
         return False
     fresh = 0 <= lag_sec <= window_sec
     return fresh and block_age_sec >= window_sec
@@ -380,7 +383,9 @@ def _manage_open(broker, symbol, mid, now_iso, expiry_min):
             if tk in live_tickets:
                 trig = group_tp1.get(r["group_id"], r["tp"])
                 reached = (not DEEP_LIMIT) and ((mid >= trig) if long else (mid <= trig))
-                age = (pd.Timestamp.now(tz="UTC") - pd.Timestamp(r["created_at"])).total_seconds() / 60
+                # Use the injected clock (now_iso) — same clock as the rest of the loop —
+                # so expiry is consistent + deterministically testable (prod: now_iso = real now).
+                age = (pd.Timestamp(now_iso()) - pd.Timestamp(r["created_at"])).total_seconds() / 60
                 if reached or age > expiry_min:
                     why = "giá chạm TP1, chưa khớp" if reached else f"hết hạn {age:.0f}min"
                     if broker.cancel(tk):
@@ -679,22 +684,30 @@ def main() -> int:
                     # own SL/TP, so a crash leaves it safe (just possibly unmanaged).
                     st["done"][k] = {"status": "placing", "at": now_iso()}
                     _save_state(st)
-                    recs = []            # each landed leg, INSERTED into trade_db immediately
+                    recs = []            # each NEW landed leg, INSERTED into trade_db immediately
+                    landed = 0           # legs the broker confirmed (new OR reconciled-dup)
+                    hard_reason = None   # a non-retryable failure reason (→ alert + place_failed)
+                    failed = []          # (leg, reason) for EVERY failed leg (hard or transient)
                     known_tk = {int(r["ticket"]) for r in trade_db.open_trades() if r["ticket"]}
                     for o in d.orders:
                         is_market = o.order_type.endswith("market")
                         if is_market:
                             res = broker.place_market(args.symbol, o)
-                            if res is None:
-                                print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
-                                continue
-                            ticket, fill = res["position_id"], res["fill_price"]
+                            ticket = res["position_id"] if res else None
+                            fill = res["fill_price"] if res else None
                         else:
                             ticket = broker.place_limit(args.symbol, o)
-                            if ticket is None:
-                                print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
-                                continue
-                            fill = o.entry                # a limit fills AT its price
+                            fill = o.entry if ticket is not None else None  # limit fills AT its price
+                        if ticket is None:
+                            why = getattr(broker, "last_place_error", None) or "không rõ"
+                            print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry} — {why}")
+                            failed.append((o.leg, why))
+                            # retryable (price-dependent) skip → leave hard_reason None so the
+                            # signal is re-evaluated next poll; HARD failure → record the reason.
+                            if not getattr(broker, "last_place_retryable", False):
+                                hard_reason = why
+                            continue
+                        landed += 1
                         if int(ticket) in known_tk:
                             # reconcile returned an ALREADY-TRACKED ticket (unclear send
                             # matched an old/sibling order) — don't create a duplicate row.
@@ -721,18 +734,57 @@ def main() -> int:
                             rec.update(status="pending")
                         tid = trade_db.insert(rec)
                         recs.append({"trade_id": tid, "ticket": ticket, "leg": o.leg, "order": o})
-                    if not recs:
-                        st["done"][k] = {"status": "place_failed", "at": now_iso()}
+                    if landed == 0:
+                        # NOTHING landed.
+                        if hard_reason is not None:
+                            # HARD failure (retcode 10027 AutoTrading off, no margin, account
+                            # blocked, stops geometry): a real-money place that landed NO leg
+                            # must NEVER be silent. Terminal place_failed + actionable alert.
+                            st["done"][k] = {"status": "place_failed", "at": now_iso()}
+                            _save_state(st)
+                            o0 = d.orders[0]
+                            notify.send(
+                                f"⛔ <b>[{ACCOUNT_LABEL}] ĐẶT LỆNH THẤT BẠI</b> — {_method_label(o0.tp1_pip)} "
+                                f"{sig.get('direction')} {args.symbol}\n"
+                                f"entry {o0.entry} · SL {o0.sl} · TP1 {o0.tp}\n"
+                                f"Lý do: <code>{hard_reason}</code>\n"
+                                f"Không có lệnh nào vào. Kiểm tra MT5/VPS ngay."
+                            )
+                            continue
+                        # Only TRANSIENT price-dependent skips (worse-than-anchor, no-tick,
+                        # price moved off SL/TP): do NOT abandon or alert — un-mark so the next
+                        # poll re-evaluates (decide may turn it into a placeable limit). The
+                        # STALE guard eventually marks it done if it never becomes fillable.
+                        st["done"].pop(k, None)
                         _save_state(st)
+                        print(f"  [{now_iso()}] transient skip {sig.get('direction')} — reconsider next poll")
                         continue
+                    # ≥1 leg handled → HARD block these levels (placed = new rows; may be [] if
+                    # every landed leg reconciled to an already-tracked ticket).
                     st["done"][k] = {"placed": [{"trade_id": r["trade_id"], "ticket": r["ticket"],
                                                  "leg": r["leg"]} for r in recs]}
                     _save_state(st)
-                    # one notify for the legs that landed; backfill tg_msg_id so closes can reply.
-                    msg_id = notify.send(_place_msg([r["order"] for r in recs], sig, lag))
-                    if msg_id:
-                        for r in recs:
-                            trade_db.update(r["trade_id"], tg_msg_id=msg_id)
+                    if recs and not failed:
+                        # FULL placement → standard bracket message (correct TP1/TP3 labels).
+                        msg_id = notify.send(_place_msg([r["order"] for r in recs], sig, lag))
+                        if msg_id:
+                            for r in recs:
+                                trade_db.update(r["trade_id"], tg_msg_id=msg_id)
+                    elif failed:
+                        # PARTIAL bracket: ≥1 leg landed but another FAILED (hard reject OR transient
+                        # price-skip). The signal is now a hard block so the missing leg will NOT be
+                        # retried. Send ONE accurate message (NOT _place_msg, which would mislabel a
+                        # lone tp3 leg as "TP1 full") + backfill tg_msg_id so closes can still reply.
+                        got = ", ".join(r["leg"] for r in recs) or "(đã có sẵn)"
+                        bad = "; ".join(f"{lg} ({rs})" for lg, rs in failed)
+                        msg_id = notify.send(
+                            f"⚠️ <b>[{ACCOUNT_LABEL}] BRACKET THIẾU LEG</b> — chỉ vào: {got} "
+                            f"({sig.get('direction')} {args.symbol}). Leg lỗi: <code>{bad}</code>\n"
+                            f"Kiểm tra MT5 (có thể thiếu runner/BE)."
+                        )
+                        if msg_id:
+                            for r in recs:
+                                trade_db.update(r["trade_id"], tg_msg_id=msg_id)
 
             # Re-check the account right before management (which READS the broker and
             # WRITES the ledger): if the login flipped since the poll-top check, skip this

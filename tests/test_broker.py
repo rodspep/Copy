@@ -18,6 +18,7 @@ def make_broker(fake=None, login=433674415, require_demo=True):
     b._lock = threading.RLock()
     b._login = login
     b.require_demo = require_demo
+    b.last_place_error = None
     return b, fake
 
 
@@ -58,6 +59,72 @@ def test_place_limit_account_changed_blocked():
     b, f = make_broker()
     f.acc.login = 999999                          # account switched
     assert b.place_limit("XAUUSDm", _lim()) is None and not f._orders
+
+
+# ---- last_place_error (drives the copier's place-FAILED Telegram alert) ----
+def test_place_limit_success_clears_last_error():
+    b, f = make_broker()
+    assert b.place_limit("XAUUSDm", _lim()) is not None
+    assert b.last_place_error is None             # success → no error recorded
+
+
+def test_place_limit_failed_records_retcode_reason():
+    b, f = make_broker()
+    f.next_retcode = 10027                        # AutoTrading disabled by client
+    got = b.place_limit("XAUUSDm", _lim())        # no matching pending → genuine failure
+    assert got is None
+    assert b.last_place_error and "10027" in b.last_place_error
+
+
+def test_place_limit_blocked_records_reason():
+    b, f = make_broker()
+    f.acc.login = 999999                          # account switched → BLOCKED
+    assert b.place_limit("XAUUSDm", _lim()) is None
+    assert b.last_place_error and "BLOCKED" in b.last_place_error
+
+
+def test_place_market_worse_than_anchor_records_reason():
+    b, f = make_broker()
+    f.ask = 4460.3                                # buy anchor 4460 → exec worse → skip
+    assert b.place_market("XAUUSDm", _mkt(anchor=4460.0)) is None
+    assert b.last_place_error and "anchor" in b.last_place_error
+
+
+def test_place_market_failed_records_retcode_reason():
+    b, f = make_broker()
+    f.next_retcode = 10027
+    assert b.place_market("XAUUSDm", _mkt(anchor=4461.0)) is None
+    assert b.last_place_error and "10027" in b.last_place_error
+
+
+# ---- retryable classification (transient price-skip vs HARD failure) ----
+def test_worse_than_anchor_is_retryable():
+    # spread pushed exec past anchor → price-dependent skip → reconsider next poll, no alert
+    b, f = make_broker()
+    f.ask = 4460.3
+    assert b.place_market("XAUUSDm", _mkt(anchor=4460.0)) is None
+    assert b.last_place_retryable is True
+
+
+def test_no_tick_is_retryable():
+    b, f = make_broker()
+    f.symbol_info_tick = lambda *_a, **_k: None    # no tick available → transient skip
+    assert b.place_market("XAUUSDm", _mkt(anchor=4461.0)) is None
+    assert b.last_place_retryable is True
+
+
+def test_retcode_failure_is_hard_not_retryable():
+    b, f = make_broker()
+    f.next_retcode = 10027
+    assert b.place_market("XAUUSDm", _mkt(anchor=4461.0)) is None
+    assert b.last_place_retryable is False        # HARD → copier alerts + place_failed
+
+
+def test_blocked_is_hard_not_retryable():
+    b, f = make_broker()
+    f.acc.login = 999999
+    assert b.place_limit("XAUUSDm", _lim()) is None
+    assert b.last_place_retryable is False
 
 
 # ---- place_market ----
