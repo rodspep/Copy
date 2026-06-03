@@ -21,38 +21,47 @@ def _sell(tp1=150, lo=4552, hi=4555, sl=4565):
             "tps_pip": {1: tp1, 2: 200, 3: 300}}
 
 
-# ---- zone-aware entry style ----
-def test_buy_in_zone_enters_market():
-    d = decide(_buy(tp1=150), current_price=4465)        # 4465 in [4458,4468]
+# ---- zone-aware entry style: MARKET only at-or-better than anchor mid ----
+def test_buy_at_or_below_mid_enters_market():
+    d = decide(_buy(tp1=150), current_price=4460)        # 4460 <= mid 4463, >= zlo 4458
     assert d.action == "place"
     o = d.order
     assert o.order_type == "buy_market"
-    assert o.entry == 4465                                # market = current price
-    assert o.tp == round(4463 + 150 * 0.1, 3)            # 4478, from anchor mid 4463
+    assert o.entry == 4460                                # market = current (good) price
+    assert o.tp == round(4463 + 150 * 0.1, 3)            # 4478, TP from anchor mid 4463
     assert o.sl == 4448 and o.volume == 0.01
 
 
-def test_buy_above_zone_rests_limit():
-    d = decide(_buy(tp1=150), current_price=4475)        # 4475 > zhi 4468 → wait for pullback
+def test_buy_above_mid_in_zone_uses_limit_not_market():
+    # REGRESSION (the +$4.10 bug): price ABOVE the anchor but still in-zone must NOT
+    # market-buy high ("đu đỉnh") — rest a LIMIT at mid and wait for the pull-back.
+    d = decide(_buy(tp1=150), current_price=4465)        # 4465 > mid 4463, in zone
     assert d.action == "place"
     assert d.order.order_type == "buy_limit"
-    assert d.order.entry == 4463                          # limit at anchor mid
-    assert d.order.tp == round(4463 + 150 * 0.1, 3)
+    assert d.order.entry == 4463                          # limit at anchor, not 4465
+
+
+def test_buy_above_zone_rests_limit():
+    d = decide(_buy(tp1=150), current_price=4475)        # 4475 > zhi → wait for pullback
+    assert d.order.order_type == "buy_limit" and d.order.entry == 4463
+
+
+def test_sell_at_or_above_mid_enters_market():
+    d = decide(_sell(tp1=150), current_price=4554)        # 4554 >= mid 4553.5, <= zhi 4555
+    assert d.action == "place"
+    assert d.order.order_type == "sell_market"
+    assert d.order.entry == 4554
+
+
+def test_sell_below_mid_in_zone_uses_limit_not_market():
+    # REGRESSION mirror: price below anchor (in zone) must rest a limit, not sell low.
+    d = decide(_sell(tp1=150), current_price=4553)        # 4553 < mid 4553.5, in zone
+    assert d.order.order_type == "sell_limit" and d.order.entry == 4553.5
 
 
 def test_sell_below_zone_rests_limit():
-    d = decide(_sell(tp1=150), current_price=4550)        # 4550 < zlo 4552 → wait for rally
-    assert d.action == "place"
-    assert d.order.order_type == "sell_limit"
-    assert d.order.entry == 4553.5
-    assert d.order.tp == round(4553.5 - 150 * 0.1, 3)     # 4538.5
-
-
-def test_sell_in_zone_enters_market():
-    d = decide(_sell(tp1=150), current_price=4553)        # in [4552,4555]
-    assert d.action == "place"
-    assert d.order.order_type == "sell_market"
-    assert d.order.entry == 4553
+    d = decide(_sell(tp1=150), current_price=4550)        # 4550 < zlo → wait for rally
+    assert d.order.order_type == "sell_limit" and d.order.entry == 4553.5
 
 
 def test_skip_past_zone_wrong_way():
@@ -92,12 +101,12 @@ def test_chase_mode_limit_and_skips(monkeypatch):
 
 # ---- bracket (TP1 + TP3 runner) ----
 def test_bracket_two_legs_market_in_zone():
-    d = decide(_buy(tp1=50, lo=4468, hi=4458, sl=4448), current_price=4465)
+    d = decide(_buy(tp1=50, lo=4468, hi=4458, sl=4448), current_price=4461)  # <= mid 4463
     assert d.action == "place" and len(d.orders) == 2
     a, b = d.orders
     assert a.leg == "tp1" and b.leg == "tp3"
     assert a.order_type == b.order_type == "buy_market"
-    assert a.entry == b.entry == 4465 and a.sl == b.sl == 4448
+    assert a.entry == b.entry == 4461 and a.sl == b.sl == 4448
     assert a.tp == round(4463 + 50 * 0.1, 3)             # 4468 (anchor + TP1)
     assert b.tp == round(4463 + 300 * 0.1, 3)            # 4493 (anchor + TP3=300)
     assert b.tp_pip == 300 and a.tp1_pip == b.tp1_pip == 50

@@ -152,12 +152,20 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     # DEEP_LIMIT=False restores the conservative legacy chase (limit only, between
     # entry and TP1, never market).
     if DEEP_LIMIT:
-        if zlo <= current_price <= zhi:
-            entry_used, market = current_price, True
-        elif (current_price > zhi) if long else (current_price < zlo):
-            entry_used, market = mid, False
+        # MARKET only when it gives an entry AT-OR-BETTER than the anchor (never chase):
+        #   long  → market only if price <= mid (buy at/below planned entry);
+        #           price > mid  → LIMIT at mid, wait for the pull-back DOWN (don't buy high).
+        #   short → market only if price >= mid (sell at/above planned entry);
+        #           price < mid  → LIMIT at mid, wait for the rally UP (don't sell low).
+        # Past the zone the wrong way (long: price < zlo; short: price > zhi) → voided.
+        if long:
+            if current_price < zlo:
+                return Decision("skip", f"price {current_price} below entry zone {zlo}-{zhi} — voided")
+            entry_used, market = (current_price, True) if current_price <= mid else (mid, False)
         else:
-            return Decision("skip", f"price {current_price} past entry zone {zlo}-{zhi} — voided")
+            if current_price > zhi:
+                return Decision("skip", f"price {current_price} above entry zone {zlo}-{zhi} — voided")
+            entry_used, market = (current_price, True) if current_price >= mid else (mid, False)
     else:
         in_window = (mid < current_price < tp1_price) if long else (tp1_price < current_price < mid)
         if not in_window:
