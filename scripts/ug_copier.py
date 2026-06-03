@@ -452,8 +452,9 @@ def _manage_open(broker, symbol, mid, now_iso, expiry_min):
                 print(f"  [{now_iso()}] CLOSED {leg} {hit} @ {cp:.2f} pnl {pnl:+.2f}")
 
     # Break-even: any OPEN runner (tp3) whose scalp (tp1) sibling already WON → move the
-    # runner's SL to entry. Standing check (re-fetches siblings) → retries until accepted.
-    for r in opens:
+    # runner's SL to entry. RE-QUERY (not the snapshot) so a runner that FILLED earlier in this
+    # same pass is seen as 'filled' now → BE applies immediately, not one poll late.
+    for r in trade_db.open_trades():
         if (r["leg"] == "tp3" and r["status"] == "filled" and r["position_id"] and r["group_id"]):
             sibs = trade_db.siblings(r["group_id"])
             tp1_won = any(s["leg"] == "tp1" and s["status"] == "closed_tp" for s in sibs)
@@ -719,8 +720,14 @@ def main() -> int:
                     landed = 0           # legs the broker confirmed (new OR reconciled-dup)
                     hard_reason = None   # a non-retryable failure reason (→ alert + place_failed)
                     failed = []          # (leg, reason) for EVERY failed leg (hard or transient)
+                    tp1_landed = False   # only place the runner (tp3) if the tp1 leg landed
                     known_tk = {int(r["ticket"]) for r in trade_db.open_trades() if r["ticket"]}
                     for o in d.orders:
+                        # Never create a runner-only bracket: tp3's SL→BE depends on a CLOSED
+                        # tp1 sibling, so a tp3 without tp1 would run with no BE protection.
+                        if o.leg == "tp3" and not tp1_landed:
+                            print(f"  [{now_iso()}] skip runner tp3 — tp1 leg didn't land (no BE base)")
+                            continue
                         is_market = o.order_type.endswith("market")
                         if is_market:
                             res = broker.place_market(args.symbol, o)
@@ -739,6 +746,8 @@ def main() -> int:
                                 hard_reason = why
                             continue
                         landed += 1
+                        if o.leg == "tp1":
+                            tp1_landed = True
                         if int(ticket) in known_tk:
                             # reconcile returned an ALREADY-TRACKED ticket (unclear send
                             # matched an old/sibling order) — don't create a duplicate row.

@@ -18,6 +18,26 @@ from src.exec.ug_copier_logic import Order
 MAGIC = 770150                  # tags this copier's orders
 COMMENT = "ug_copier"
 
+_TRANSIENT_RC = None
+def _retryable_retcode(mt5, rc) -> bool:
+    """True if an order_send retcode is a TRANSIENT/price-or-market condition — the copier
+    should re-evaluate next poll (no alert), NOT terminally abandon the signal. Hard/unknown
+    retcodes (AutoTrading off, no money, trade disabled, ...) stay non-retryable → alert.
+    Conservative: only KNOWN-transient codes are retryable; anything else is hard (so a real
+    'broker said no' like AutoTrading-off is never silently retried away)."""
+    global _TRANSIENT_RC
+    if _TRANSIENT_RC is None:
+        # ONLY deterministic "broker rejected, nothing landed" codes → safe to re-decide.
+        # EXCLUDE transport-ambiguous codes (CONNECTION/TIMEOUT): the order MIGHT have landed
+        # while the response was lost, and _find_pending() also returns None on a query failure,
+        # so retrying could double-place → keep those HARD (fail closed, alert, orphan-recover).
+        names = ("TRADE_RETCODE_REQUOTE", "TRADE_RETCODE_REJECT", "TRADE_RETCODE_PRICE_CHANGED",
+                 "TRADE_RETCODE_PRICE_OFF", "TRADE_RETCODE_INVALID_PRICE", "TRADE_RETCODE_INVALID_STOPS",
+                 "TRADE_RETCODE_MARKET_CLOSED", "TRADE_RETCODE_TOO_MANY_REQUESTS",
+                 "TRADE_RETCODE_NO_PRICES", "TRADE_RETCODE_FROZEN")
+        _TRANSIENT_RC = {getattr(mt5, n) for n in names if hasattr(mt5, n)}
+    return rc in _TRANSIENT_RC
+
 
 def _synced(fn):
     """Serialize a broker method on self._lock (MT5 API not thread-safe; command-loop
@@ -144,7 +164,7 @@ class Mt5Broker:
     def place_limit(self, symbol: str, o: Order) -> int | None:
         mt5 = self.mt5
         self.last_place_error = None
-        self.last_place_retryable = False        # limit failures are all HARD (geometry/reject)
+        self.last_place_retryable = False        # default hard; set per-retcode on a send reject
         ok, why = self._account_ok()             # re-verify account EVERY send
         if not ok:
             print(f"  [mt5] BLOCKED place_limit — {why}")
@@ -170,9 +190,12 @@ class Mt5Broker:
         print(f"  [mt5] order_send unclear retcode={getattr(r,'retcode',None)} "
               f"{getattr(r,'comment','')} — reconciling...")
         found = self._find_pending(symbol, o)
-        if found is None:                        # genuine failure → record why for the alert
-            self.last_place_error = (f"retcode={getattr(r,'retcode',None)} "
-                                     f"{getattr(r,'comment','') or ''}".strip())
+        if found is None:                        # genuine failure → record why + classify
+            rc = getattr(r, "retcode", None)
+            self.last_place_error = f"retcode={rc} {getattr(r,'comment','') or ''}".strip()
+            # price-moved/market-transient limit rejects → retryable (re-decide next poll, e.g.
+            # as market); AutoTrading-off / no-money / unknown → hard (alert, don't silently lose).
+            self.last_place_retryable = _retryable_retcode(mt5, rc)
         return found
 
     @_synced
