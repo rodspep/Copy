@@ -2,7 +2,7 @@
 REM ===========================================================================
 REM  REAL-MONEY copier. Only use this AFTER the MT5 terminal is logged into the
 REM  REAL account. --allow-real permits trading a non-demo account; real_mode then
-REM  trades ONLY the proven 50pip edge (100/150 auto-skipped on a real account). The
+REM  trades ALL UG methods with the UNIFIED exit (TP1@50pip + runner@150pip + SL->BE). The
 REM  bot AUTO-DETECTS demo vs real and uses a SEPARATE ledger per real account
 REM  (data\copier_trades_real_<login>.db) so real P/L never mixes with demo stats.
 REM  Conservative: vol 0.01/leg (0.02/signal), max-open 6 (=3 concurrent signals),

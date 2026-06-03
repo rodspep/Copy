@@ -35,7 +35,15 @@ PIP = 0.1                       # XAU: 1 pip = 0.1 price
 # at MID across all three so the only variable compared is TP1 size.
 # near=entry_low (entry-side); deep=entry_high (SL-side); mid=midpoint.
 ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "mid", 150.0: "mid"}
-OBSERVE_ONLY_TP1 = (100.0, 150.0)      # not real-money edges; demo observation only
+OBSERVE_ONLY_TP1 = ()                   # (was 100/150) — now ALL methods use the same exit
+# UNIFIED EXIT (user decision, applies to demo AND real): every UG signal — regardless of
+# its published TP template — is traded as the proven scalp bracket: TP1 leg at a FIXED
+# 50 pip + runner leg at a FIXED 150 pip, SL→BE after TP1. Data: the 50pip-TP1 wins ~88%
+# across ALL method entries (73 fills pooled); 100/150's far native TPs were the loser, so
+# we cap them to the well-sampled scalp distances. tp1_pip still carries the signal's
+# method (50/100/150) for /stats labelling + dedup, but the TP PRICES are fixed.
+FIXED_TP1_PIP = 50.0
+FIXED_TP3_PIP = 150.0
 ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
 # EXIT strategy (scripts/ug_exit_strategy.py, Codex-reviewed): instead of taking the
@@ -138,7 +146,9 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     long = direction == "long"
     sign = 1.0 if long else -1.0
     zlo, zhi = (lo, hi) if lo <= hi else (hi, lo)
-    tp1_price = mid + sign * tp1_pip * PIP
+    # UNIFIED exit: TP1 is ALWAYS 50 pip from the anchor (not the signal's published TP1).
+    # tp1_pip is kept above purely as the method identity (50/100/150) for /stats + dedup.
+    tp1_price = mid + sign * FIXED_TP1_PIP * PIP
 
     # SL must sit on the correct (loss) side, TP1 on the profit side, of the anchor.
     if (long and not (sl < mid < tp1_price)) or (not long and not (sl > mid > tp1_price)):
@@ -183,18 +193,14 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     anchor_r = round(mid, 3)
     legs = [Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
                   tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1",
-                  tp_pip=tp1_pip, anchor=anchor_r)]
+                  tp_pip=FIXED_TP1_PIP, anchor=anchor_r)]
 
-    # Runner leg to TP3 (UG's published TP3 level), if enabled + present + further than TP1.
+    # Runner leg: TP always a FIXED 150 pip from the anchor (unified across all methods).
     if RUNNER_TP3:
-        tp3_raw = _f(tps.get(3) or tps.get("3"))
-        if tp3_raw is not None and math.isfinite(tp3_raw) and tp3_raw > tp1_pip + 1e-9:
-            tp3_price = mid + sign * tp3_raw * PIP
-            beyond = (tp3_price > tp1_price) if long else (tp3_price < tp1_price)
-            if beyond:
-                legs.append(Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
-                                  tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
-                                  leg="tp3", tp_pip=tp3_raw, anchor=anchor_r))
+        tp3_price = mid + sign * FIXED_TP3_PIP * PIP
+        legs.append(Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
+                          tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
+                          leg="tp3", tp_pip=FIXED_TP3_PIP, anchor=anchor_r))
     return Decision("place", "ok", orders=tuple(legs))
 
 

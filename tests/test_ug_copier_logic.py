@@ -28,7 +28,8 @@ def test_buy_at_or_below_mid_enters_market():
     o = d.order
     assert o.order_type == "buy_market"
     assert o.entry == 4460                                # market = current (good) price
-    assert o.tp == round(4463 + 150 * 0.1, 3)            # 4478, TP from anchor mid 4463
+    assert o.tp == round(4463 + 50 * 0.1, 3)             # 4468 — UNIFIED TP1 = 50pip (not 150)
+    assert o.tp_pip == 50 and o.tp1_pip == 150           # actual TP 50pip; method id still 150
     assert o.sl == 4448 and o.volume == 0.01
 
 
@@ -81,21 +82,22 @@ def test_filter_accepts_50_100_150():
     assert decide(_buy(tp1=150), 4465).action == "place"
 
 
-def test_real_mode_skips_observe_only():
+def test_real_mode_trades_all_methods_unified():
+    # UNIFIED: 100/150 are no longer observe-only — they trade on real too (same exit).
     assert decide(_buy(tp1=50), 4465, real_mode=True).action == "place"
-    assert decide(_buy(tp1=100), 4465, real_mode=True).action == "skip"
-    assert decide(_buy(tp1=150), 4465, real_mode=True).action == "skip"
+    assert decide(_buy(tp1=100), 4465, real_mode=True).action == "place"
+    assert decide(_buy(tp1=150), 4465, real_mode=True).action == "place"
 
 
 # ---- DEEP_LIMIT kill-switch (legacy chase: limit only, no market, no in-zone-below-mid) ----
 def test_chase_mode_limit_and_skips(monkeypatch):
     import src.exec.ug_copier_logic as L
     monkeypatch.setattr(L, "DEEP_LIMIT", False)
-    # between mid(4463) and TP1(4478) → legacy limit
-    d = L.decide(_buy(tp1=150), current_price=4470)
+    # between mid(4463) and TP1(4468=mid+50pip) → legacy limit at mid
+    d = L.decide(_buy(tp1=150), current_price=4465)
     assert d.action == "place" and d.order.order_type == "buy_limit" and d.order.entry == 4463
-    # past TP1 → skip; in-zone-below-mid → skip (legacy never enters market)
-    assert L.decide(_buy(tp1=150), 4480).action == "skip"
+    # past TP1 (>4468) → skip; in-zone-below-mid → skip (legacy never enters market)
+    assert L.decide(_buy(tp1=150), 4470).action == "skip"
     assert L.decide(_buy(tp1=150), 4460).action == "skip"
 
 
@@ -107,9 +109,10 @@ def test_bracket_two_legs_market_in_zone():
     assert a.leg == "tp1" and b.leg == "tp3"
     assert a.order_type == b.order_type == "buy_market"
     assert a.entry == b.entry == 4461 and a.sl == b.sl == 4448
-    assert a.tp == round(4463 + 50 * 0.1, 3)             # 4468 (anchor + TP1)
-    assert b.tp == round(4463 + 300 * 0.1, 3)            # 4493 (anchor + TP3=300)
-    assert b.tp_pip == 300 and a.tp1_pip == b.tp1_pip == 50
+    assert a.tp == round(4463 + 50 * 0.1, 3)             # 4468 (anchor + FIXED TP1 50pip)
+    assert b.tp == round(4463 + 150 * 0.1, 3)            # 4478 (anchor + FIXED TP3 150pip)
+    assert b.tp_pip == 150 and a.tp_pip == 50
+    assert a.tp1_pip == b.tp1_pip == 50                  # method id (here PP2=50)
     assert b.tp > a.tp                                    # runner strictly further
 
 
@@ -121,10 +124,19 @@ def test_bracket_short_limit_below_zone():
     assert b.tp < a.tp < a.entry                          # both TPs below entry for a short
 
 
-def test_bracket_degrades_to_single_without_tp3():
+def test_runner_always_added_fixed_150_even_without_published_tp3():
+    # UNIFIED: the runner TP is a FIXED 150pip — added even if the signal lists no TP3.
     sig = {"direction": "long", "entry_low": 4468, "entry_high": 4458, "sl": 4448,
-           "tps_pip": {1: 50, 2: 100}}
-    d = decide(sig, current_price=4465)
+           "tps_pip": {1: 50, 2: 100}}                   # no TP3 published
+    d = decide(sig, current_price=4461)
+    assert d.action == "place" and len(d.orders) == 2
+    assert d.orders[1].leg == "tp3" and d.orders[1].tp == round(4463 + 150 * 0.1, 3)
+
+
+def test_runner_kill_switch(monkeypatch):
+    import src.exec.ug_copier_logic as L
+    monkeypatch.setattr(L, "RUNNER_TP3", False)
+    d = L.decide(_buy(tp1=50, lo=4468, hi=4458, sl=4448), current_price=4461)
     assert d.action == "place" and len(d.orders) == 1 and d.orders[0].leg == "tp1"
 
 

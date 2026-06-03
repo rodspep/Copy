@@ -1,20 +1,23 @@
-"""UG signal copier — filter, place a pending LIMIT, manage. MT5 / VPS.
+"""UG signal copier — filter, place a zone-aware bracket, manage. MT5 / VPS.
 
-Reads parsed UG signals from a file feed (data/ug/live_signals.jsonl), and for
-each NEW signal: decide() [filter TP1∈{50,100,150}; entry per method (50→mid,
-100→near, 150→deep); TP=TP1 from that entry; skip if price past TP1 / wrong side]
-→ place a pending LIMIT (or DRY-log). Tracks placed pendings and CANCELS any that
-hasn't filled once price reaches TP1 (don't chase) or after an expiry.
+Reads parsed UG signals from a file feed (data/ug/live_signals.jsonl). For each NEW
+signal: decide() [filter TP1∈{50,100,150} method types; ZONE-AWARE entry: MARKET when
+price is at/better than the anchor (mid), else a LIMIT at the anchor waiting for the
+pull-back; skip if price is past the zone the wrong way]. Auto-detects demo vs real and
+keeps a separate ledger/state/telegram per account.
 
-DESIGN — TP1-only, all-out: we set ONE TP (=TP1) and the broker SL on the pending.
-Once it fills, the position runs to that SL/TP under MT5 (we do NOT do UG's
-TP1..TP4 partials / break-even / trailing). That is intentional for now.
+EXIT — UNIFIED bracket for ALL methods: two equal legs at the same entry+SL —
+  leg 'tp1' : FIXED 50 pip   (the proven high-WR scalp; ~88% across all method entries)
+  leg 'tp3' : FIXED 150 pip  (runner; its SL → break-even once the tp1 leg wins)
+The signal's published far TPs (100/150/300...) are NOT used as targets; tp1_pip only
+identifies the method (50/100/150) for /stats + dedup. Stale-guard, daily-loss
+circuit-breaker, heartbeat + external watchdog, orphan recovery on restart.
 
-SAFETY: DRY-RUN by default (real prices, no orders). --live places real orders and
-ABORTS unless the account is DEMO (override: --allow-real). The broker RE-checks
-the account on every send. Singleton lock prevents two copiers. Exposure cap
-(--max-open). Volume 0.01. Only orders tagged with our MAGIC are touched. Run
-inside the MT5 interactive session (like the signal bot).
+SAFETY: DRY-RUN by default. --live places real orders, ABORTS on a non-DEMO account
+unless --allow-real. Account is re-checked every send (cancel/modify too) and the loop
+fail-stops on a mid-run login change; ledger-feeding reads fail closed on mismatch.
+Singleton lock; exposure cap (--max-open); vol 0.01/leg. MAGIC-tagged orders only.
+Run inside the MT5 interactive session.
 
 Feed line = one parsed UG signal dict (see scripts/parse_ug_export.py), e.g.:
   {"ts":"...","direction":"long","entry_low":4468,"entry_high":4458,"sl":4448,
@@ -443,7 +446,7 @@ def main() -> int:
     if args.live and not is_demo and not args.allow_real:
         raise SystemExit("ABORT: --live on a non-DEMO account. Pass --allow-real to trade real money.")
     ACCOUNT_LABEL = "DEMO" if is_demo else "MAIN"
-    real_mode = not is_demo                  # auto: real account trades only the proven 50pip edge
+    real_mode = not is_demo                  # kept for API; unified exit means it gates nothing now
 
     # Auto ledger: DEMO keeps copier_trades.db; each REAL account gets its own ledger
     # (copier_trades_real_<login>.db) so its WR/P&L is tracked from scratch, separate.
@@ -476,7 +479,7 @@ def main() -> int:
     if acc:
         print(f"  account {acc.login} · {acc.server} · {ACCOUNT_LABEL} · balance {acc.balance}")
     if args.live and not is_demo:
-        print("  !! REAL-MONEY order placement ENABLED · only 50pip traded !!")
+        print("  !! REAL-MONEY order placement ENABLED · all UG methods, unified 50/150 exit !!")
     elif args.live:
         print("  !! LIVE order placement ENABLED (demo — all methods) !!")
 
@@ -486,7 +489,7 @@ def main() -> int:
     _adopt_orphans(broker, args.symbol)        # recover any untracked magic orders/positions
     # copier's own command bot (separate token) → /stats /open /last /flat /pause
     threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
-    _filter = "50pip" if real_mode else "50/100/150"
+    _filter = "50/100/150 (unified 50pip+runner150 exit)"
     notify.send(f"📥 <b>UG Copier khởi động — [{ACCOUNT_LABEL}]</b> · {mode} · {args.symbol} · "
                 f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")
