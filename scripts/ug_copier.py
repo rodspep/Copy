@@ -327,8 +327,17 @@ def main() -> int:
     acc = broker._account_info_retry()
     if args.live and acc is None:
         raise SystemExit("ABORT: cannot read account_info")
-    is_demo = (acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO) if acc else True
+    # Two independent signals: MT5's trade_mode flag AND the server name (Exness demo
+    # servers contain 'Trial', real servers contain 'Real'). CONSERVATIVE: treat as REAL
+    # if EITHER says real — never mis-classify a real account as demo.
+    server = (acc.server or "") if acc else ""
+    mode_demo = (acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO) if acc else True
+    name_real = "real" in server.lower()
+    is_demo = mode_demo and not name_real
     login = int(acc.login) if acc else 0
+    if acc:
+        print(f"  [detect] trade_mode={'demo' if mode_demo else 'real'} · server='{server}' "
+              f"(name_real={name_real}) → {'DEMO' if is_demo else 'MAIN/REAL'}")
     if args.live and not is_demo and not args.allow_real:
         raise SystemExit("ABORT: --live on a non-DEMO account. Pass --allow-real to trade real money.")
     ACCOUNT_LABEL = "DEMO" if is_demo else "MAIN"
