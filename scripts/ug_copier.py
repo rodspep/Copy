@@ -200,7 +200,12 @@ def _place_msg(orders, sig, lag: float) -> str:
     else:
         tps = f"TP1 {o.tp:.2f}"
         plan = "TP1 full"
+    if o.order_type.endswith("market"):
+        style = "⚡ <b>VÀO NGAY</b> (market — đã khớp, không có tin khớp riêng)"
+    else:
+        style = "⏳ <b>LỆNH CHỜ</b> (limit — đợi giá hồi về; sẽ báo khi khớp)"
     return (f"📥 <b>COPY · {arrow} XAUUSDm</b>\n"
+            f"{style}\n"
             f"➡️ Entry <b>{o.entry:.2f}</b> · 🛑 SL {o.sl:.2f}\n"
             f"🎯 {tps}\n"
             f"📦 Vol {o.volume}×{nlegs} · {_method_label(o.tp1_pip)} · {plan}\n"
