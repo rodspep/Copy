@@ -182,7 +182,9 @@ def _vn(ts_iso: str) -> str:
 
 
 def _method_label(pip) -> str:
-    return {50.0: "PP2 scalp", 100.0: "method-100", 150.0: "PRI 150"}.get(float(pip or 0), f"TP1 {pip}")
+    # TP1 pip → UG signal family (confirmed from a week of signal headers):
+    #   50 = Phương Pháp 2 + Ai Scalp Signal · 100 = PRI GOLD · 150 = Ai Signals
+    return {50.0: "PP2/Scalp", 100.0: "PRI GOLD", 150.0: "Ai Signals"}.get(float(pip or 0), f"TP1 {pip}")
 
 
 def _leg_label(leg) -> str:
