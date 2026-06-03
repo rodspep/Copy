@@ -7,6 +7,7 @@ Pure sqlite, no MT5 — the copier writes it; a /stats reader reads it.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path("data/copier_trades.db")
@@ -86,13 +87,29 @@ def open_trades() -> list[sqlite3.Row]:
 
 
 def realized_pnl_since(iso_ts: str) -> float:
-    """NET realized P/L (sum profit of closed legs) with closed_at >= iso_ts. Used by
-    the daily-loss circuit-breaker. Lexicographic compare is valid for ISO-8601 UTC."""
+    """NET realized P/L (sum profit of closed legs) with closed_at >= iso_ts. Used by the
+    daily-loss circuit-breaker. Parses timestamps to tz-aware datetimes (robust to mixed
+    offsets / legacy rows — lexicographic compare would mis-window a non-UTC offset)."""
+    try:
+        cutoff = datetime.fromisoformat(iso_ts)
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=timezone.utc)
+    except Exception:
+        return 0.0
     with _conn() as c:
-        rows = c.execute(
-            "SELECT profit FROM trades WHERE status LIKE 'closed%' "
-            "AND closed_at IS NOT NULL AND closed_at >= ?", (iso_ts,)).fetchall()
-    return sum((r["profit"] or 0) for r in rows)
+        rows = c.execute("SELECT profit, closed_at FROM trades WHERE status LIKE 'closed%' "
+                         "AND closed_at IS NOT NULL").fetchall()
+    total = 0.0
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r["closed_at"])
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if t >= cutoff:
+            total += r["profit"] or 0
+    return total
 
 
 def siblings(group_id: str) -> list[sqlite3.Row]:

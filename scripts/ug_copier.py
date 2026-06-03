@@ -222,8 +222,15 @@ STATE = Path("data/ug/copier_state.json")
 
 def _key(sig: dict) -> str:
     # Dedup by CONTENT (not ts): UG reposts the same signal ~1 min apart with a new
-    # timestamp — those must collapse to ONE order, not one per repost.
-    return "|".join(str(sig.get(k)) for k in ("direction", "entry_low", "entry_high", "sl"))
+    # timestamp — those must collapse to ONE order, not one per repost. INCLUDE TP1 so a
+    # different method (50 vs 100/150) with the same zone/SL isn't wrongly deduped, and so
+    # this doubles safely as the bracket group_id (both legs share the same TP1).
+    tps = sig.get("tps_pip") if isinstance(sig.get("tps_pip"), dict) else {}
+    try:
+        tp1 = f"{float(tps.get(1) or tps.get('1')):g}"      # canonical (50/50.0/'50' → '50')
+    except (TypeError, ValueError):
+        tp1 = "?"
+    return "|".join(str(sig.get(k)) for k in ("direction", "entry_low", "entry_high", "sl")) + f"|{tp1}"
 
 
 def _load_state() -> dict:
@@ -521,6 +528,7 @@ def main() -> int:
                     st["done"][k] = {"status": "placing", "at": now_iso()}
                     _save_state(st)
                     recs = []            # each landed leg, INSERTED into trade_db immediately
+                    known_tk = {int(r["ticket"]) for r in trade_db.open_trades() if r["ticket"]}
                     for o in d.orders:
                         is_market = o.order_type.endswith("market")
                         if is_market:
@@ -535,6 +543,13 @@ def main() -> int:
                                 print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
                                 continue
                             fill = o.entry                # a limit fills AT its price
+                        if int(ticket) in known_tk:
+                            # reconcile returned an ALREADY-TRACKED ticket (unclear send
+                            # matched an old/sibling order) — don't create a duplicate row.
+                            print(f"  [{now_iso()}] {o.leg} reconciled to already-tracked "
+                                  f"ticket {ticket} — skip dup insert")
+                            continue
+                        known_tk.add(int(ticket))
                         print(f"  [{now_iso()}] (lag {lag:.1f}s) PLACED {o.order_type} {o.leg} "
                               f"{args.symbol} {o.volume} @ {fill} sl={o.sl} tp={o.tp} ticket={ticket}")
                         # INSERT NOW (before notify / next leg) so a crash can't leave the
@@ -610,8 +625,12 @@ def main() -> int:
                         if fi == "unknown":
                             continue          # transient history-query failure — retry next poll
                         if fi:
+                            # entry := ACTUAL fill (a limit can gap-fill better than its
+                            # price) so break-even later moves the runner SL to the true
+                            # entry, not the order price.
                             trade_db.update(tid, status="filled", position_id=fi["position_id"],
-                                            fill_price=fi["fill_price"], filled_at=now_iso())
+                                            fill_price=fi["fill_price"], entry=fi["fill_price"],
+                                            filled_at=now_iso())
                             notify.send(f"📌 <b>Đã vào lệnh</b> ({_leg_label(leg)}) "
                                         f"@ {fi['fill_price']:.2f}", reply_to=r["tg_msg_id"])
                             print(f"  [{now_iso()}] FILLED {leg} ticket {tk} @ {fi['fill_price']:.2f}")

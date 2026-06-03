@@ -311,10 +311,20 @@ class Mt5Broker:
     @_synced
     def fill_info(self, order_ticket: int):
         """Filled → {position_id, fill_price}; confirmed-not-filled → None;
-        history query FAILED → "unknown" (so the caller doesn't misread a transient
-        failure as a cancellation)."""
+        query FAILED → "unknown" (so the caller doesn't misread a transient failure).
+
+        REAL-TIME FIRST: a filled pending becomes a POSITION with the SAME ticket
+        immediately (no history lag). We check positions BEFORE deal history so a
+        just-filled order is never misread as 'cancelled/vanished' while history lags.
+        History is the fallback (covers a position already closed since it filled)."""
         if self.login_changed():
             return "unknown"                 # wrong account — don't conclude anything
+        pos = self.mt5.positions_get(ticket=int(order_ticket))
+        if pos is None:
+            return "unknown"                 # positions query failed — don't conclude
+        if pos:
+            p = pos[0]
+            return {"position_id": int(p.ticket), "fill_price": float(p.price_open)}
         deals = self._deals()
         if deals is None:
             return "unknown"                 # query failed — don't conclude anything
