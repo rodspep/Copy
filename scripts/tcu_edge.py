@@ -23,6 +23,12 @@ PIP = 0.1
 USD_PER_PRICE = 1.0          # 0.01 lot XAU
 EXPIRY_MIN = 120
 COST = 3 * PIP * USD_PER_PRICE   # ~3pip round-trip per leg
+# RECENCY: UG actively rewrites its logic (channel intel + a clear quality breakpoint
+# ~mid-May: WR jumped ~69%→~85%). Pooling all history mixes the OLD buggy version with the
+# CURRENT one and is MISLEADING (it made the 50pip scalp look like a loser when, in the
+# current version, it earns +$1.4/recv). So the DEFAULT view is the recent window; full
+# history is shown only as context. Tune to taste.
+RECENT_DAYS = 28
 
 
 def load_m1():
@@ -180,27 +186,39 @@ def main():
               f"WR {wr:>3.0f}%  reach50 {r50:>3.0f}%")
 
     incov = [r for r in results if r["ts"] <= mmax]
-    print(f"== OUR EXIT (TP1@50+runner@150+BE) on {len(incov)} signals in M1 coverage ==")
-    agg(incov, "ALL")
-    print("\n  -- by method family (displayName) --")
-    for name in sorted(set(r["name"] for r in incov)):
-        agg([r for r in incov if r["name"] == name], name)
-    print("\n  -- by TP1 template (method id) --")
-    for tp in sorted(set(r["tp1_pip"] for r in incov if r["tp1_pip"] is not None)):
-        agg([r for r in incov if r["tp1_pip"] == tp], f"TP1={tp}pip")
-    print("\n  -- ROLLING by month (is the edge stable?) --")
-    for mo in sorted(set(r["ts"].strftime("%Y-%m") for r in incov)):
-        agg([r for r in incov if r["ts"].strftime("%Y-%m") == mo], mo)
-    print("\n  -- 50pip scalp by month --")
-    scalp = [r for r in incov if r["tp1_pip"] == 50]
-    for mo in sorted(set(r["ts"].strftime("%Y-%m") for r in scalp)):
-        agg([r for r in scalp if r["ts"].strftime("%Y-%m") == mo], f"50pip {mo}")
+    cut = mmax - pd.Timedelta(days=RECENT_DAYS)
+    recent = [r for r in incov if r["ts"] >= cut]
 
-    # Entry-adjustment + SL-distance audit per family: is a 'better family' just getting a
-    # more favourable shifted entry (artifact), not a better signal? (Codex disambiguation.)
-    print("\n  -- entry-adjustment / SL-distance audit by family --")
-    for name in sorted(set(r["name"] for r in incov)):
-        g = [r for r in incov if r["name"] == name]
+    def by(rows, dimfn, vals=None, prefix=""):
+        for v in (vals if vals is not None else sorted(set(dimfn(r) for r in rows))):
+            agg([r for r in rows if dimfn(r) == v], f"{prefix}{v}")
+
+    # ===== DEFAULT VIEW: the CURRENT version (recent window) — use THIS for decisions =====
+    print(f"#### CURRENT VERSION — last {RECENT_DAYS}d (since {cut.date()}) — {len(recent)} signals ####")
+    print("   (UG rewrites its logic; this is the version live trading actually faces)\n")
+    print("== OUR EXIT (TP1@50+runner@150+BE) ==")
+    agg(recent, "ALL")
+    print("\n  -- by TP1 template --")
+    by(recent, lambda r: r["tp1_pip"], prefix="TP1=", vals=[v for v in (50, 100, 150, 200)
+       if any(r["tp1_pip"] == v for r in recent)])
+    print("\n  -- by method family --")
+    by(recent, lambda r: r["name"])
+
+    # ===== TRAJECTORY: weekly — shows the breakpoint (don't pool across it) =====
+    print("\n#### WEEKLY trajectory (ALL methods) — where did quality shift? ####")
+    by(incov, lambda r: r["ts"].strftime("%Y-W%V"))
+
+    # ===== CONTEXT ONLY: full pooled history — MIXES old+current, do NOT use for decisions ==
+    print(f"\n#### FULL HISTORY pooled ({len(incov)} sig) — CONTEXT ONLY, mixes old buggy + current ####")
+    agg(incov, "ALL (pooled)")
+    by(incov, lambda r: r["tp1_pip"], prefix="TP1=", vals=[v for v in (50, 100, 150, 200)
+       if any(r["tp1_pip"] == v for r in incov)])
+
+    # Entry-adjustment + SL-distance audit per family (recent window): is a 'better family'
+    # just getting a more favourable shifted entry (artifact), not a better signal?
+    print(f"\n  -- entry-adjustment / SL-distance audit by family (last {RECENT_DAYS}d) --")
+    for name in sorted(set(r["name"] for r in recent)):
+        g = [r for r in recent if r["name"] == name]
         adj = []
         for r in g:
             i = t.searchsorted(np.datetime64(r["ts"]))

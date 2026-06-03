@@ -69,3 +69,34 @@ in the TCU API map to these:
    x/10" + CAUTION/FOLLOW — we could weight or skip low-confidence / high-risk signals.
 
 NONE of the above is implemented — these are leads for the decode-v2 + edge work.
+
+## CORRECTION (important) — DON'T pool history; UG's version changed mid-May
+First pass pooled 6 weeks of the API set under our exit and concluded the 50pip scalp was
+weak/overfit. That was WRONG — it mixed UG's OLD (buggy) and CURRENT (improved) versions.
+A clean weekly replay shows a sharp quality breakpoint ~W21 (mid-May), consistent with the
+channel's constant "đang sửa / bot mới":
+
+  week  W17  W18  W19  W20 | W21  W22  W23      (WR of filled)
+  ALL   67%  73%  78%  70% | 83%  90%  80%
+  50pip 67%  69%  69%  69% | 82%  88%  79%
+
+Split OLD (<W21) vs CURRENT (≥W21), net $/received signal under our exit:
+  TP1=50 : OLD −$0.85 (WR 69%)  →  CURRENT +$1.42 (WR 83%)
+  TP1=150: OLD +$1.12          →  CURRENT +$0.41
+  TP1=200: OLD +$0.44          →  CURRENT +$1.85 (WR 92%, n=21)
+  ALL    : OLD −$0.23          →  CURRENT +$1.34 (WR 84%)
+
+Conclusions:
+- The 50pip scalp was a LOSER in the old version but is one of the BEST in the current one.
+  So the live copier (50/100/150 + unified exit) is trading the IMPROVED version — reasonable.
+- The earlier "Telegram week" wasn't a cherry-picked fluke — it was the START of the improved
+  regime. Templates/SL barely changed week-to-week; what changed is QUALITY (entry/timing) →
+  a logic/code improvement, not a template change.
+- CAVEAT: "better now" = code improvement OR favourable market regime — can't fully separate;
+  UG keeps changing, so it can break again. The shadow-log (forward, receipt-time) is the
+  safeguard that will show a quality drop immediately.
+
+DECISION: analysis is now RECENCY-WEIGHTED by default (scripts/tcu_edge.py RECENT_DAYS=28 +
+weekly trajectory; full-pooled shown only as context). Do NOT make filter decisions on pooled
+history. TP1=200 (currently filtered out by the copier) is the strongest CURRENT bucket but
+n=21 — confirm on the shadow-log before opening it.
