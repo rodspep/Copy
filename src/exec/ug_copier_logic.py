@@ -131,59 +131,60 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     if not all(math.isfinite(v) for v in (lo, hi, sl)):
         return Decision("skip", "non-finite entry zone / SL")
 
-    # Entry within the zone, per the method's chosen mode.
-    # UG writes the zone "near - deep": entry_low(lo)=near (entry-side),
-    # entry_high(hi)=deep (SL-side, = the fixed-SL anchor). mid = average.
-    entry = {"near": lo, "mid": (lo + hi) / 2.0, "deep": hi}[ENTRY_MODE_BY_TP1[tp1_pip]]
-    sign = 1.0 if direction == "long" else -1.0
-    otype = "buy_limit" if direction == "long" else "sell_limit"
+    # 'mid' = the published-entry anchor (TP1/TP3 prices are measured from it, matching
+    # UG's stated levels). The entry ZONE is [zlo, zhi].
+    mid = {"near": lo, "mid": (lo + hi) / 2.0, "deep": hi}[ENTRY_MODE_BY_TP1[tp1_pip]]
+    long = direction == "long"
+    sign = 1.0 if long else -1.0
+    zlo, zhi = (lo, hi) if lo <= hi else (hi, lo)
+    tp1_price = mid + sign * tp1_pip * PIP
 
-    tp = entry + sign * tp1_pip * PIP
+    # SL must sit on the correct (loss) side, TP1 on the profit side, of the anchor.
+    if (long and not (sl < mid < tp1_price)) or (not long and not (sl > mid > tp1_price)):
+        return Decision("skip", f"bad geometry: mid={mid} sl={sl} tp1={tp1_price}")
 
-    # SL must sit on the correct (loss) side of entry; else the signal is malformed.
-    if (direction == "long" and not (sl < entry < tp)) or \
-       (direction == "short" and not (sl > entry > tp)):
-        return Decision("skip", f"bad geometry: entry={entry} sl={sl} tp={tp}")
-
-    # Placement validity for a pull-back LIMIT:
-    #  - The limit must rest on the fillable side of market: buy-limit BELOW market
-    #    (price > entry), sell-limit ABOVE market (price < entry). Else the "pull-back"
-    #    already triggered or the limit would be wrong-side → skip.
-    #  - DEEP_LIMIT=True: that's the ONLY requirement — we place and wait for the
-    #    pull-back even if price already passed TP1 (it's a limit, not a chase).
-    #  - DEEP_LIMIT=False (chase): additionally skip if price already reached TP1.
-    if direction == "long":
-        if current_price <= entry:
-            return Decision("skip", f"price {current_price} at/below entry {entry} (no pull-back room)")
-        if not DEEP_LIMIT and current_price >= tp:
-            return Decision("skip", f"price {current_price} at/through TP1 {tp}")
+    # ZONE-AWARE entry (DEEP_LIMIT). Decide entry style by where price sits vs the zone:
+    #   - in the zone            → enter NOW at market (we're at an acceptable entry).
+    #   - beyond zone, wait side → rest a LIMIT at the anchor, wait for the pull-back.
+    #     (long: price above zone; short: price below zone)
+    #   - past the zone the wrong way → setup voided → skip.
+    #     (long: price below zone; short: price above zone)
+    # DEEP_LIMIT=False restores the conservative legacy chase (limit only, between
+    # entry and TP1, never market).
+    if DEEP_LIMIT:
+        if zlo <= current_price <= zhi:
+            entry_used, market = current_price, True
+        elif (current_price > zhi) if long else (current_price < zlo):
+            entry_used, market = mid, False
+        else:
+            return Decision("skip", f"price {current_price} past entry zone {zlo}-{zhi} — voided")
     else:
-        if current_price >= entry:
-            return Decision("skip", f"price {current_price} at/above entry {entry} (no pull-back room)")
-        if not DEEP_LIMIT and current_price <= tp:
-            return Decision("skip", f"price {current_price} at/through TP1 {tp}")
+        in_window = (mid < current_price < tp1_price) if long else (tp1_price < current_price < mid)
+        if not in_window:
+            return Decision("skip", f"chase: price {current_price} not between entry {mid} and TP1 {tp1_price}")
+        entry_used, market = mid, False
 
-    entry_r, sl_r = round(entry, 3), round(sl, 3)
-    leg_tp1 = Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
-                    tp=round(tp, 3), volume=volume, tp1_pip=tp1_pip,
-                    leg="tp1", tp_pip=tp1_pip)
+    # Final entry-side sanity for the ACTUAL entry used.
+    if (long and not (sl < entry_used < tp1_price)) or (not long and not (sl > entry_used > tp1_price)):
+        return Decision("skip", f"entry {entry_used} not between SL {sl} and TP1 {tp1_price}")
 
-    # Runner leg to TP3 (only if enabled AND the signal carries a valid, further TP3).
-    # If TP3 is missing/malformed, degrade safely to a single TP1-full order.
+    suffix = "market" if market else "limit"
+    otype = f"{'buy' if long else 'sell'}_{suffix}"
+    entry_r, sl_r = round(entry_used, 3), round(sl, 3)
+    legs = [Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
+                  tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1", tp_pip=tp1_pip)]
+
+    # Runner leg to TP3 (UG's published TP3 level), if enabled + present + further than TP1.
     if RUNNER_TP3:
         tp3_raw = _f(tps.get(3) or tps.get("3"))
         if tp3_raw is not None and math.isfinite(tp3_raw) and tp3_raw > tp1_pip + 1e-9:
-            tp3_price = entry + sign * tp3_raw * PIP
-            # tp3 must be strictly beyond tp1 on the profit side (sign already ensures
-            # direction; tp3_raw>tp1_pip ensures further). Belt-and-suspenders check:
-            beyond = (tp3_price > tp > entry) if direction == "long" else (tp3_price < tp < entry)
+            tp3_price = mid + sign * tp3_raw * PIP
+            beyond = (tp3_price > tp1_price) if long else (tp3_price < tp1_price)
             if beyond:
-                leg_tp3 = Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
-                                tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
-                                leg="tp3", tp_pip=tp3_raw)
-                return Decision("place", "ok", orders=(leg_tp1, leg_tp3))
-
-    return Decision("place", "ok", orders=(leg_tp1,))
+                legs.append(Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
+                                  tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
+                                  leg="tp3", tp_pip=tp3_raw))
+    return Decision("place", "ok", orders=tuple(legs))
 
 
 def should_cancel_pending(order: Order, current_price: float) -> bool:

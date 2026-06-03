@@ -42,6 +42,23 @@ target captures more upside at zero extra risk → runner-TP2 (+137.80) < runner
 3. **1/4 ladder TP1/2/3/4 +BE** (+$159.05): close to TP4-runner; more partial closes
    (more spread cost in reality). Lower priority.
 
+## RUNBOOK — switch demo → REAL money
+Preconditions (gate, do NOT skip): forward-test passed (WR holds ~80%+ out-of-sample),
+full Codex whole-bot review clean, you accept the risk. Then on the VPS:
+1. `stop_feeds.bat` (stops demo copier + listener).
+2. In the MT5 terminal GUI: log OUT of demo, log IN to the REAL account. Enable
+   AutoTrading (and keep "disable algo trading via external Python API" UNCHECKED).
+3. `start_real.bat` — relaunches listener + the REAL copier (`run_copier_real_inner.bat`:
+   `--live --allow-real --tag real --volume 0.01 --max-open 6 --expiry-min 120`).
+4. VERIFY `logs\copier.log`: `account <real#> · <server> · REAL · !! LIVE order placement
+   ENABLED !!`. Real P/L goes to a SEPARATE ledger `data\copier_trades_real.db` (demo
+   history untouched). `/stats` on the copier reads whichever ledger is active.
+5. Start SMALL (0.01/leg). Ensure balance ≥ ~$1,500 (risk ~$23/signal ≈ 1.5%). Scale only
+   after real trading proves out over weeks.
+Revert: `stop_feeds.bat` → log terminal back to demo → `start_feeds.bat`.
+Safety in place: account-lock (fail-closed), real_mode skips 100/150, orphan recovery,
+transient-read retry, market-price re-validation, singleton lock, stale guard.
+
 ## Decision (2026-06-03)
 Keep the LIVE config (deep-limit + 50% TP1 / 50% TP3 + BE) UNCHANGED while forward-testing
 deep-limit on demo. The exit-target refinements above are all within a $137–166 in-sample

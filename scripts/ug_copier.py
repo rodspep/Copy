@@ -308,10 +308,16 @@ def main() -> int:
                          "against stale reposts / feed backlog being placed late)")
     ap.add_argument("--allow-real", action="store_true",
                     help="permit --live on a REAL account (default: live allowed on DEMO only)")
+    ap.add_argument("--tag", default="",
+                    help="ledger namespace (e.g. 'real'): separates DB/state/lock so a real "
+                         "account's P/L never mixes with demo. Empty = default (demo).")
     args = ap.parse_args()
 
     global STATE
-    mode_tag = "live" if args.live else "dry"
+    suffix = f"_{args.tag}" if args.tag else ""
+    mode_tag = ("live" if args.live else "dry") + suffix
+    # Separate ledger per tag so real-money P/L is tracked apart from demo.
+    trade_db.DB_PATH = Path(f"data/copier_trades{suffix}.db")
     STATE = Path(f"data/ug/copier_state_{mode_tag}.json")
 
     # Singleton lock — refuse to start if another copier of this mode is alive
@@ -406,28 +412,37 @@ def main() -> int:
                     # own SL/TP, so a crash leaves it safe (just possibly unmanaged).
                     st["done"][k] = {"status": "placing", "at": now_iso()}
                     _save_state(st)
-                    placed = []          # [(Order, ticket)] for legs that actually landed
+                    placed = []          # [(Order, ticket, is_market)] for legs that landed
                     for o in d.orders:
-                        ticket = broker.place_limit(args.symbol, o)
+                        is_market = o.order_type.endswith("market")
+                        ticket = (broker.place_market(args.symbol, o) if is_market
+                                  else broker.place_limit(args.symbol, o))
                         if ticket is None:
                             print(f"  [{now_iso()}] place FAILED {o.order_type} {o.leg} @ {o.entry}")
                             continue       # not retried (safety); other leg may still place
                         print(f"  [{now_iso()}] (lag {lag:.1f}s) PLACED {o.order_type} {o.leg} "
                               f"{args.symbol} {o.volume} @ {o.entry} sl={o.sl} tp={o.tp} ticket={ticket}")
-                        placed.append((o, ticket))
+                        placed.append((o, ticket, is_market))
                     if not placed:
                         st["done"][k] = {"status": "place_failed", "at": now_iso()}
                         _save_state(st)
                         continue
-                    msg_id = notify.send(_place_msg([o for o, _ in placed], sig, lag))
+                    msg_id = notify.send(_place_msg([o for o, _, _ in placed], sig, lag))
                     recs = []
-                    for o, ticket in placed:
-                        tid = trade_db.insert({
-                            "signal_ts": sig.get("ts"), "direction": o.side,
-                            "method_pip": o.tp1_pip, "order_type": o.order_type,
-                            "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
-                            "ticket": ticket, "status": "pending", "tg_msg_id": msg_id,
-                            "created_at": now_iso(), "leg": o.leg, "group_id": k})
+                    for o, ticket, is_market in placed:
+                        # MARKET legs are already filled positions → record as 'filled' with
+                        # position_id (skip the pending stage). LIMIT legs start 'pending'.
+                        rec = {"signal_ts": sig.get("ts"), "direction": o.side,
+                               "method_pip": o.tp1_pip, "order_type": o.order_type,
+                               "entry": o.entry, "sl": o.sl, "tp": o.tp, "volume": o.volume,
+                               "ticket": ticket, "tg_msg_id": msg_id,
+                               "created_at": now_iso(), "leg": o.leg, "group_id": k}
+                        if is_market:
+                            rec.update(status="filled", position_id=ticket,
+                                       fill_price=o.entry, filled_at=now_iso())
+                        else:
+                            rec.update(status="pending")
+                        tid = trade_db.insert(rec)
                         recs.append({"trade_id": tid, "ticket": ticket, "leg": o.leg})
                     st["done"][k] = {"placed": recs}
                     _save_state(st)

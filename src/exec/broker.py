@@ -131,6 +131,50 @@ class Mt5Broker:
               f"{getattr(r,'comment','')} — reconciling...")
         return self._find_pending(symbol, o)
 
+    def place_market(self, symbol: str, o: Order) -> int | None:
+        """Open a MARKET position immediately (zone-aware in-zone entry). Returns the
+        position_id, or None. On an UNCLEAR send we do NOT retry (a market retry could
+        double-open); orphan recovery on next startup adopts any position that did land."""
+        mt5 = self.mt5
+        ok, why = self._account_ok()
+        if not ok:
+            print(f"  [mt5] BLOCKED place_market — {why}")
+            return None
+        if not self._stops_ok(symbol, o):
+            print(f"  [mt5] SL/TP too close to price (stops_level) — reject market {o.entry}")
+            return None
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            print("  [mt5] no tick for market order — skip")
+            return None
+        buy = o.order_type == "buy_market"
+        price = tick.ask if buy else tick.bid
+        # Re-validate against the ACTUAL execution price (not o.entry): spread/tick move
+        # since decide() could put the real fill on the wrong side of SL/TP or inside the
+        # broker's min stop distance. Fail closed before sending a real market order.
+        info = self.mt5.symbol_info(symbol)
+        point = ((info.point if info else 0.01) or 0.01)
+        min_dist = (info.trade_stops_level or 0) * point if info else 0
+        good_side = (o.sl < price < o.tp) if buy else (o.sl > price > o.tp)
+        if not good_side:
+            print(f"  [mt5] market price {price} not between SL {o.sl} and TP {o.tp} — skip")
+            return None
+        if min_dist > 0 and (abs(price - o.sl) < min_dist or abs(o.tp - price) < min_dist):
+            print(f"  [mt5] market price {price} inside stops_level dist — skip")
+            return None
+        req = {
+            "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(o.volume),
+            "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": float(price),
+            "sl": float(o.sl), "tp": float(o.tp), "deviation": 30, "magic": MAGIC,
+            "type_filling": mt5.ORDER_FILLING_IOC, "comment": COMMENT,
+        }
+        r = mt5.order_send(req)
+        if r is not None and r.retcode == mt5.TRADE_RETCODE_DONE:
+            return int(r.order)            # for a market deal, position_id == order ticket
+        print(f"  [mt5] market order unclear/failed retcode={getattr(r,'retcode',None)} "
+              f"{getattr(r,'comment','')} — NOT retrying (orphan recovery will adopt if it landed)")
+        return None
+
     def pending_tickets(self, symbol: str) -> set[int] | None:
         """Set of our pending tickets, or None if the query FAILED (so the caller
         does NOT mistake an API error for 'all orders gone')."""
@@ -242,6 +286,13 @@ class DryRunBroker(Mt5Broker):
         self._dry_open.add(self._fake)
         print(f"  [DRY] would place {o.order_type} {symbol} {o.volume} @ {o.entry} "
               f"sl={o.sl} tp={o.tp} (TP1 {o.tp1_pip:g}pip) ticket~{self._fake}")
+        return self._fake
+
+    def place_market(self, symbol: str, o: Order) -> int | None:
+        self._fake += 1
+        self._dry_open.add(self._fake)
+        print(f"  [DRY] would MARKET {o.order_type} {symbol} {o.volume} @ ~{o.entry} "
+              f"sl={o.sl} tp={o.tp} (TP1 {o.tp1_pip:g}pip) pos~{self._fake}")
         return self._fake
 
     def pending_tickets(self, symbol: str) -> set[int] | None:
