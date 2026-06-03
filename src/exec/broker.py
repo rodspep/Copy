@@ -9,6 +9,7 @@ Only `Order`s produced by the unit-tested ug_copier_logic.decide() reach here.
 """
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
 
 from src.exec.ug_copier_logic import Order
@@ -24,16 +25,29 @@ class Mt5Broker:
         import MetaTrader5 as mt5
         self.mt5 = mt5
         self.require_demo = require_demo
-        acc = mt5.account_info()
+        acc = self._account_info_retry()
         self._login = acc.login if acc else None       # lock the startup account
+
+    def _account_info_retry(self, tries: int = 3):
+        """account_info() with a few quick retries — a transient None (terminal busy)
+        shouldn't be read as a hard failure that blocks an otherwise-valid placement."""
+        for i in range(tries):
+            acc = self.mt5.account_info()
+            if acc is not None:
+                return acc
+            if i < tries - 1:
+                time.sleep(0.3)
+        return None
 
     def _account_ok(self) -> tuple[bool, str]:
         """Re-verify (every send) that the account hasn't changed and, unless
         explicitly allowed, is still a DEMO account."""
-        acc = self.mt5.account_info()
+        acc = self._account_info_retry()
         if acc is None:
             return False, "no account_info"
-        if self._login is not None and acc.login != self._login:
+        if self._login is None:
+            return False, "startup account unknown — refuse to place (fail-closed)"
+        if acc.login != self._login:
             return False, f"account changed {self._login}->{acc.login}"
         if self.require_demo and acc.trade_mode != self.mt5.ACCOUNT_TRADE_MODE_DEMO:
             return False, f"account {acc.login} is NOT demo (require_demo)"
@@ -145,6 +159,23 @@ class Mt5Broker:
             return None
         return sum(1 for tk in list(pend) if self.cancel(tk))
 
+    def list_magic(self, symbol: str) -> dict | None:
+        """Our magic pendings + positions as plain dicts (for orphan recovery on
+        startup). None if either query failed (caller must NOT conclude 'none')."""
+        orders = self.mt5.orders_get(symbol=symbol)
+        positions = self.mt5.positions_get(symbol=symbol)
+        if orders is None or positions is None:
+            return None
+        pend = [{"ticket": int(o.ticket), "type": int(o.type), "entry": float(o.price_open),
+                 "sl": float(o.sl), "tp": float(o.tp), "volume": float(o.volume_current)}
+                for o in orders if o.magic == MAGIC]
+        pos = [{"position_id": int(p.ticket), "type": int(p.type), "entry": float(p.price_open),
+                "sl": float(p.sl), "tp": float(p.tp), "volume": float(p.volume),
+                "fill_price": float(p.price_open)}
+               for p in positions if p.magic == MAGIC]
+        return {"pendings": pend, "positions": pos,
+                "buy_limit": self.mt5.ORDER_TYPE_BUY_LIMIT, "pos_buy": self.mt5.POSITION_TYPE_BUY}
+
     def modify_sl(self, position_id: int, new_sl: float) -> bool:
         """Move an OPEN position's SL (e.g. to break-even), keeping its TP. True on
         success. False if the position is gone or the broker rejects."""
@@ -223,6 +254,9 @@ class DryRunBroker(Mt5Broker):
         self._dry_open.discard(ticket)
         print(f"  [DRY] would cancel ticket {ticket}")
         return True
+
+    def list_magic(self, symbol: str) -> dict | None:
+        return {"pendings": [], "positions": [], "buy_limit": 2, "pos_buy": 0}
 
     def modify_sl(self, position_id: int, new_sl: float) -> bool:
         print(f"  [DRY] would move SL of pos {position_id} -> {new_sl}")

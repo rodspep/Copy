@@ -94,8 +94,10 @@ def _open_text() -> str:
     out = [f"📂 <b>{len(rows)} lệnh mở/chờ</b>:"]
     for r in rows:
         st = "⏳chờ" if r["status"] == "pending" else "📈mở"
+        m = r["method_pip"]
+        tag = f"TP1 {m:g}" if m is not None else (r["leg"] or "orphan")
         out.append(f"{st} #{r['id']} {r['direction']} @{r['entry']:.2f} "
-                   f"SL {r['sl']:.2f} TP {r['tp']:.2f} (TP1 {r['method_pip']:g})")
+                   f"SL {r['sl']:.2f} TP {r['tp']:.2f} ({tag})")
     return "\n".join(out)
 
 
@@ -229,6 +231,56 @@ def _save_state(st: dict) -> None:
 
 
 
+def _adopt_orphans(broker, symbol: str) -> None:
+    """On startup, adopt any of OUR magic orders/positions at the broker that aren't in
+    the trade ledger (e.g. a crash between order_send and the DB insert left them
+    untracked). They carry their own SL/TP so they're bounded, but adopting them lets
+    the lifecycle manager cancel/close + report them. Each becomes its own group (no
+    BE-linking — that history is lost — but it's protected by its own SL)."""
+    info = broker.list_magic(symbol)
+    if not info:
+        print("  [adopt] list_magic unavailable — skipping orphan scan")
+        return
+    known_ord, known_pos = set(), set()
+    for r in trade_db.open_trades():
+        if r["ticket"]:
+            known_ord.add(int(r["ticket"]))
+        if r["position_id"]:
+            known_pos.add(int(r["position_id"]))
+    now = pd.Timestamp.now(tz="UTC").isoformat()
+    adopted = 0
+    for o in info["pendings"]:
+        if o["ticket"] in known_ord:
+            continue
+        long = o["type"] == info["buy_limit"]
+        trade_db.insert({"direction": "long" if long else "short",
+                         "order_type": "buy_limit" if long else "sell_limit",
+                         "entry": o["entry"], "sl": o["sl"], "tp": o["tp"], "volume": o["volume"],
+                         "ticket": o["ticket"], "status": "pending", "created_at": now,
+                         "leg": "orphan", "group_id": f"orphan:{o['ticket']}",
+                         "note": "adopted orphan pending"})
+        adopted += 1
+    for p in info["positions"]:
+        # Skip if tracked as a position OR if it came from a tracked PENDING that filled
+        # while we were offline: in MT5 a filled limit's position_id == its order ticket,
+        # so a position_id matching a known pending ticket is already ours (it'll resolve
+        # via fill_info). Avoids a duplicate orphan row for one live position.
+        if p["position_id"] in known_pos or p["position_id"] in known_ord:
+            continue
+        long = p["type"] == info["pos_buy"]
+        trade_db.insert({"direction": "long" if long else "short",
+                         "order_type": "buy_limit" if long else "sell_limit",
+                         "entry": p["entry"], "sl": p["sl"], "tp": p["tp"], "volume": p["volume"],
+                         "ticket": p["position_id"], "position_id": p["position_id"],
+                         "fill_price": p["fill_price"], "status": "filled", "created_at": now,
+                         "filled_at": now, "leg": "orphan", "group_id": f"orphan:{p['position_id']}",
+                         "note": "adopted orphan position"})
+        adopted += 1
+    if adopted:
+        print(f"  [adopt] recovered {adopted} untracked magic order(s)/position(s)")
+        notify.send(f"♻️ <b>Nhận lại {adopted} lệnh mồ côi</b> (chưa được theo dõi) vào quản lý.")
+
+
 def _read_feed() -> list[dict]:
     if not FEED.exists():
         return []
@@ -275,7 +327,7 @@ def main() -> int:
           f"· expiry {args.expiry_min}min")
     if args.live:
         # Safety: --live is allowed only on a DEMO account unless explicitly forced.
-        acc = broker.mt5.account_info()
+        acc = broker._account_info_retry()       # retry — don't abort on a transient read
         if acc is None:
             raise SystemExit("ABORT: cannot read account_info")
         is_demo = acc.trade_mode == broker.mt5.ACCOUNT_TRADE_MODE_DEMO
@@ -288,6 +340,7 @@ def main() -> int:
     st = _load_state()
     trade_db.init_db()
     now_iso = lambda: pd.Timestamp.now(tz="UTC").isoformat()
+    _adopt_orphans(broker, args.symbol)        # recover any untracked magic orders/positions
     # copier's own command bot (separate token) → /stats /open /last /flat /pause
     threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
     notify.send(f"📥 <b>UG Copier khởi động</b> — {mode} · {args.symbol} · vol "
