@@ -6,7 +6,8 @@ REM  trades ALL UG methods with the UNIFIED exit (TP1@50pip + runner@150pip + SL
 REM  bot AUTO-DETECTS demo vs real and uses a SEPARATE ledger per real account
 REM  (data\copier_trades_real_<login>.db) so real P/L never mixes with demo stats.
 REM  Conservative: vol 0.01/leg (0.02/signal), max-open 6 (=3 concurrent signals),
-REM  expiry 120min. Start SMALL; scale only after real trading proves out.
+REM  expiry 240min (4h — backtest: limit-at-mid fills more good-priced pullbacks, +~20-27%
+REM  $/signal vs 120min, WR unchanged ~80%). Start SMALL; scale only after real proves out.
 REM ===========================================================================
 cd /d C:\mt5-bot
 set PYTHONUNBUFFERED=yes
@@ -20,5 +21,5 @@ REM  from being re-placed stale on a restart. Tune tighter/looser to taste.
 REM  --skip-hours 13,14,15,16: skip the US-session-open window (UTC) — high vol / news,
 REM  "phiên Mỹ ngáo". Backtest: +35-50%% $/signal. (UTC 13-16 = 20-23h VN.)
 "C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.ug_copier --live --allow-real ^
-  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 120 --volume 0.01 --max-signal-age-min 2 ^
+  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 240 --volume 0.01 --max-signal-age-min 2 ^
   --skip-hours 13,14,15,16
