@@ -19,8 +19,9 @@ REM  (stops NEW entries once today's NET realized P/L <= -70 USD; ~4-5%% of equi
 REM  --max-signal-age-min 2: only place if the signal is < 2 min old (lag = UG-post →
 REM  bot). A scalp entered late is "chắc chắn lỗ"; this also stops a soft-blocked signal
 REM  from being re-placed stale on a restart. Tune tighter/looser to taste.
-REM  --skip-hours 13,14,15,16: skip the US-session-open window (UTC) — high vol / news,
-REM  "phiên Mỹ ngáo". Backtest: +35-50%% $/signal. (UTC 13-16 = 20-23h VN.)
+REM  US-session filter (--skip-hours 13,14,15,16) DISABLED per user 2026-06-04: a winning
+REM  13-16 UTC signal got blocked; user opted to trade ALL hours. The backtest had shown
+REM  skipping 13-16 = +35-50%% avg $/signal, but it's a statistical bet (blocks some winners
+REM  too). To restore, append: --skip-hours 13,14,15,16
 "C:\mt5-bot\.venv\Scripts\python.exe" -X utf8 -m scripts.ug_copier --live --allow-real ^
-  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 240 --volume 0.01 --max-signal-age-min 2 ^
-  --skip-hours 13,14,15,16
+  --symbol XAUUSDm --poll 2 --max-open 6 --expiry-min 240 --volume 0.01 --max-signal-age-min 2
