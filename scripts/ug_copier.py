@@ -499,12 +499,19 @@ def main() -> int:
                          "soft-blocked signal reconsidered late on restart — that 'chắc chắn "
                          "lỗ'. Also the dedup re-eval window: a same-levels re-post is 'new' "
                          "only after this long).")
+    ap.add_argument("--skip-hours", default="",
+                    help="comma-separated UTC hours to NOT place in (high-vol/news windows). "
+                         "Backtest + channel intel: skipping the US-session open (13-16 UTC) "
+                         "lifts $/signal ~35-50%% ('phiên Mỹ ngáo'). Empty = no session filter.")
     ap.add_argument("--allow-real", action="store_true",
                     help="permit --live on a REAL account (default: live allowed on DEMO only)")
     ap.add_argument("--tag", default="",
                     help="ledger namespace (e.g. 'real'): separates DB/state/lock so a real "
                          "account's P/L never mixes with demo. Empty = default (demo).")
     args = ap.parse_args()
+    skip_hours = {int(h) for h in args.skip_hours.split(",") if h.strip().isdigit()}
+    if skip_hours:
+        print(f"  [filter] skipping UTC hours {sorted(skip_hours)} (session/news filter)")
 
     global STATE, ACCOUNT_LABEL, PAUSE_FLAG, HEARTBEAT
     from src.exec.broker import Mt5Broker, DryRunBroker
@@ -686,6 +693,15 @@ def main() -> int:
                           f"(lag {lag:.0f}s > {args.max_signal_age_min:g}min) — not placing")
                     st["done"][k] = {"stale": lag, "at": now_iso()}
                     _save_state(st)        # soft block: re-eval only on a later FRESH re-post
+                    continue
+                # SESSION FILTER: skip high-vol/news windows (e.g. US-session open 13-16 UTC).
+                # Soft block (by ts hour) so a later re-post in a calmer hour can still trade.
+                if skip_hours and pd.Timestamp(sig["ts"]).hour in skip_hours:
+                    print(f"  [{now_iso()}] SESSION skip {sig.get('direction')} "
+                          f"(UTC hour {pd.Timestamp(sig['ts']).hour} in {sorted(skip_hours)})")
+                    st["done"][k] = {"skipped": f"session hour {pd.Timestamp(sig['ts']).hour} UTC",
+                                     "at": now_iso()}
+                    _save_state(st)
                     continue
                 d = decide(sig, mid, volume=args.volume, real_mode=real_mode)
                 if d.action == "skip":
