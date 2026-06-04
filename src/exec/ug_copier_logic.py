@@ -44,6 +44,12 @@ OBSERVE_ONLY_TP1 = ()                   # (was 100/150) — now ALL methods use 
 # method (50/100/150) for /stats labelling + dedup, but the TP PRICES are fixed.
 FIXED_TP1_PIP = 50.0
 FIXED_TP3_PIP = 150.0
+# Runner (tp3) distance PER METHOD (TP1 stays a fixed 50pip on the high-WR scalp leg).
+# Backtest (scripts/tcu_edge, recency-weighted): the 150-method (Ai Signals) RUNS far —
+# median MFE ~200pip, ~50% reach +200 — so its runner at 200pip earns ~40% more per signal
+# than at 150 with the SAME ~85% WR (TP1@50 still anchors the win-rate). The 50pip scalp
+# doesn't run as far → keeps the proven 150 runner. (50/100 to be re-checked separately.)
+RUNNER_PIP_BY_TP1 = {50.0: 150.0, 100.0: 150.0, 150.0: 200.0}
 ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
 # EXIT strategy (scripts/ug_exit_strategy.py, Codex-reviewed): instead of taking the
@@ -195,12 +201,14 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
                   tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1",
                   tp_pip=FIXED_TP1_PIP, anchor=anchor_r)]
 
-    # Runner leg: TP always a FIXED 150 pip from the anchor (unified across all methods).
+    # Runner leg: TP distance is per-method (RUNNER_PIP_BY_TP1) — 150-method runs farther so
+    # its runner is 200pip; others keep 150pip. SL→BE after the TP1 leg books (managed live).
     if RUNNER_TP3:
-        tp3_price = mid + sign * FIXED_TP3_PIP * PIP
+        tp3_pip = RUNNER_PIP_BY_TP1.get(tp1_pip, FIXED_TP3_PIP)
+        tp3_price = mid + sign * tp3_pip * PIP
         legs.append(Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
                           tp=round(tp3_price, 3), volume=volume, tp1_pip=tp1_pip,
-                          leg="tp3", tp_pip=FIXED_TP3_PIP, anchor=anchor_r))
+                          leg="tp3", tp_pip=tp3_pip, anchor=anchor_r))
     return Decision("place", "ok", orders=tuple(legs))
 
 

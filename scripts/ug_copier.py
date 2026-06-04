@@ -574,7 +574,7 @@ def main() -> int:
     _adopt_orphans(broker, args.symbol)        # recover any untracked magic orders/positions
     # copier's own command bot (separate token) → /stats /open /last /flat /pause
     threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
-    _filter = "50/100/150 (unified 50pip+runner150 exit)"
+    _filter = "50/100/150 (TP1@50 + runner: 150-method→200pip, 50/100→150pip, SL→BE)"
     notify.send(f"📥 <b>UG Copier khởi động — [{ACCOUNT_LABEL}]</b> · {mode} · {args.symbol} · "
                 f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")

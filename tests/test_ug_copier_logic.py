@@ -133,6 +133,22 @@ def test_runner_always_added_fixed_150_even_without_published_tp3():
     assert d.orders[1].leg == "tp3" and d.orders[1].tp == round(4463 + 150 * 0.1, 3)
 
 
+def test_runner_200pip_for_150_method():
+    # 150-method (Ai Signals) runs far → its runner TP is 200pip (not 150). TP1 stays 50pip.
+    d = decide(_buy(tp1=150), current_price=4460)        # mid 4463, market entry 4460
+    assert len(d.orders) == 2
+    a, b = d.orders
+    assert a.leg == "tp1" and a.tp == round(4463 + 50 * 0.1, 3) and a.tp_pip == 50
+    assert b.leg == "tp3" and b.tp == round(4463 + 200 * 0.1, 3)   # 4483 — runner 200pip
+    assert b.tp_pip == 200 and b.tp1_pip == 150                     # distance 200; method id 150
+
+
+def test_runner_stays_150_for_50_and_100():
+    for m in (50, 100):
+        d = decide(_buy(tp1=m), current_price=4460)
+        assert d.orders[1].tp_pip == 150                           # 50/100 keep the 150 runner
+
+
 def test_runner_kill_switch(monkeypatch):
     import src.exec.ug_copier_logic as L
     monkeypatch.setattr(L, "RUNNER_TP3", False)
