@@ -49,12 +49,22 @@ def _synced(fn):
 
 
 class Mt5Broker:
-    def __init__(self, require_demo: bool = True):
+    # Class-level defaults so instances built bypassing __init__ (e.g. test doubles via
+    # __new__) still resolve a magic/comment; __init__ overrides per-instance.
+    magic = MAGIC
+    comment = COMMENT
+
+    def __init__(self, require_demo: bool = True, magic: int = MAGIC, comment: str = COMMENT):
         from src.data import mt5_feed
         mt5_feed.init()                       # attach to the running terminal
         import MetaTrader5 as mt5
         self.mt5 = mt5
         self.require_demo = require_demo
+        # Per-instance order tag so independent bots (UG copier vs standalone SMC) NEVER
+        # see or manage each other's orders. Defaults preserve the copier's identity; the
+        # SMC bot passes its own magic/comment. ALL magic filters below use self.magic.
+        self.magic = magic
+        self.comment = comment
         # Serialize ALL MT5 access: the command-loop thread (/flat, /stats, /open) calls
         # the broker concurrently with the main trading loop; the MT5 Python API is not
         # guaranteed thread-safe. RLock so nested calls (open_exposure→pending_tickets)
@@ -140,7 +150,7 @@ class Mt5Broker:
         want = (self.mt5.ORDER_TYPE_BUY_LIMIT if o.order_type == "buy_limit"
                 else self.mt5.ORDER_TYPE_SELL_LIMIT)
         for x in orders:
-            if (x.magic == MAGIC and x.type == want
+            if (x.magic == self.magic and x.type == want
                     and abs(x.price_open - o.entry) <= tol
                     and abs(x.volume_current - o.volume) < 1e-9
                     and abs(x.tp - o.tp) <= tol
@@ -158,10 +168,10 @@ class Mt5Broker:
         pos = self.mt5.positions_get(symbol=symbol)
         if pos is None:
             return None
-        return len(pend) + sum(1 for p in pos if p.magic == MAGIC)
+        return len(pend) + sum(1 for p in pos if p.magic == self.magic)
 
     @_synced
-    def place_limit(self, symbol: str, o: Order) -> int | None:
+    def place_limit(self, symbol: str, o: Order, comment: str | None = None) -> int | None:
         mt5 = self.mt5
         self.last_place_error = None
         self.last_place_retryable = False        # default hard; set per-retcode on a send reject
@@ -178,9 +188,9 @@ class Mt5Broker:
         req = {
             "action": mt5.TRADE_ACTION_PENDING, "symbol": symbol,
             "volume": float(o.volume), "type": otype, "price": float(o.entry),
-            "sl": float(o.sl), "tp": float(o.tp), "magic": MAGIC,
+            "sl": float(o.sl), "tp": float(o.tp), "magic": self.magic,
             "type_time": mt5.ORDER_TIME_GTC, "type_filling": mt5.ORDER_FILLING_RETURN,
-            "comment": COMMENT,
+            "comment": (comment or self.comment)[:31],     # per-order tag (bracket relink)
         }
         r = mt5.order_send(req)
         if r is not None and r.retcode in (mt5.TRADE_RETCODE_DONE, mt5.TRADE_RETCODE_PLACED):
@@ -253,8 +263,8 @@ class Mt5Broker:
         req = {
             "action": mt5.TRADE_ACTION_DEAL, "symbol": symbol, "volume": float(o.volume),
             "type": mt5.ORDER_TYPE_BUY if buy else mt5.ORDER_TYPE_SELL, "price": float(price),
-            "sl": float(o.sl), "tp": float(o.tp), "deviation": 30, "magic": MAGIC,
-            "type_filling": mt5.ORDER_FILLING_IOC, "comment": COMMENT,
+            "sl": float(o.sl), "tp": float(o.tp), "deviation": 30, "magic": self.magic,
+            "type_filling": mt5.ORDER_FILLING_IOC, "comment": self.comment,
         }
         r = mt5.order_send(req)
         if r is not None and r.retcode == mt5.TRADE_RETCODE_DONE:
@@ -292,13 +302,26 @@ class Mt5Broker:
         orders = self.mt5.orders_get(symbol=symbol)
         if orders is None:
             return None
-        return {int(o.ticket) for o in orders if o.magic == MAGIC}
+        return {int(o.ticket) for o in orders if o.magic == self.magic}
 
     @_synced
     def cancel(self, ticket: int) -> bool:
         ok, why = self._account_ok()             # never manage the wrong account
         if not ok:
             print(f"  [mt5] BLOCKED cancel ticket={ticket} — {why}")
+            return False
+        od = self.mt5.orders_get(ticket=int(ticket))   # never cancel a non-magic order
+        if od is None:                                  # query FAILED → fail-closed, don't blind-cancel
+            print(f"  [mt5] cancel ticket={ticket}: orders_get failed — skip (fail-closed)")
+            return False
+        if od and od[0].magic != self.magic:
+            print(f"  [mt5] REFUSE cancel ticket={ticket} — magic {od[0].magic} != {self.magic}")
+            return False
+        if not od:
+            # Order vanished between the caller's pending snapshot and now. It may have just
+            # FILLED (not cancelled). Return False so the lifecycle does NOT mark it cancelled;
+            # the next _manage_open pass routes it through fill_info() to resolve correctly.
+            print(f"  [mt5] cancel ticket={ticket}: order gone — defer to fill_info (not 'cancelled')")
             return False
         r = self.mt5.order_send({"action": self.mt5.TRADE_ACTION_REMOVE, "order": int(ticket)})
         ok = r is not None and r.retcode == self.mt5.TRADE_RETCODE_DONE
@@ -331,12 +354,16 @@ class Mt5Broker:
         if orders is None or positions is None:
             return None
         pend = [{"ticket": int(o.ticket), "type": int(o.type), "entry": float(o.price_open),
-                 "sl": float(o.sl), "tp": float(o.tp), "volume": float(o.volume_current)}
-                for o in orders if o.magic == MAGIC]
+                 "sl": float(o.sl), "tp": float(o.tp), "volume": float(o.volume_current),
+                 "setup_time": int(getattr(o, "time_setup", 0) or 0),
+                 "comment": str(getattr(o, "comment", "") or "")}
+                for o in orders if o.magic == self.magic]
         pos = [{"position_id": int(p.ticket), "type": int(p.type), "entry": float(p.price_open),
                 "sl": float(p.sl), "tp": float(p.tp), "volume": float(p.volume),
-                "fill_price": float(p.price_open)}
-               for p in positions if p.magic == MAGIC]
+                "fill_price": float(p.price_open),
+                "fill_time": int(getattr(p, "time", 0) or 0),
+                "comment": str(getattr(p, "comment", "") or "")}
+               for p in positions if p.magic == self.magic]
         return {"pendings": pend, "positions": pos,
                 "buy_limit": self.mt5.ORDER_TYPE_BUY_LIMIT, "pos_buy": self.mt5.POSITION_TYPE_BUY}
 
@@ -353,6 +380,9 @@ class Mt5Broker:
             print(f"  [mt5] modify_sl: position {position_id} not found (already closed?)")
             return False
         p = pos[0]
+        if p.magic != self.magic:                # never modify another bot's / manual position
+            print(f"  [mt5] REFUSE modify_sl pos={position_id} — magic {p.magic} != {self.magic}")
+            return False
         r = self.mt5.order_send({
             "action": self.mt5.TRADE_ACTION_SLTP, "symbol": p.symbol,
             "position": int(position_id), "sl": float(new_sl), "tp": float(p.tp),
@@ -361,6 +391,58 @@ class Mt5Broker:
         if not ok:
             print(f"  [mt5] modify_sl FAILED pos={position_id} retcode={getattr(r,'retcode',None)}")
         return ok
+
+    @_synced
+    def close_position(self, position_id: int) -> bool:
+        """Market-close an OPEN position (the SMC bot's HORIZON time-stop: close a trade
+        unresolved after N bars, mirroring the backtest's close-at-horizon). True if the
+        position is closed (or already gone); False on a broker reject / query failure."""
+        ok, why = self._account_ok()             # never manage the wrong account
+        if not ok:
+            print(f"  [mt5] BLOCKED close_position pos={position_id} — {why}")
+            return False
+        pos = self.mt5.positions_get(ticket=int(position_id))
+        if pos is None:
+            return False                          # query failed — don't conclude 'closed'
+        if not pos:
+            return True                           # already gone = closed
+        p = pos[0]
+        if p.magic != self.magic:                # never close another bot's / manual position
+            print(f"  [mt5] REFUSE close_position pos={position_id} — magic {p.magic} != {self.magic}")
+            return False
+        tick = self.mt5.symbol_info_tick(p.symbol)
+        if tick is None:
+            return False
+        is_buy = p.type == self.mt5.POSITION_TYPE_BUY
+        price = tick.bid if is_buy else tick.ask  # close a buy at bid, a sell at ask
+        r = self.mt5.order_send({
+            "action": self.mt5.TRADE_ACTION_DEAL, "symbol": p.symbol,
+            "position": int(position_id), "volume": float(p.volume),
+            "type": self.mt5.ORDER_TYPE_SELL if is_buy else self.mt5.ORDER_TYPE_BUY,
+            "price": float(price), "deviation": 30, "magic": self.magic,
+            "type_filling": self.mt5.ORDER_FILLING_IOC, "comment": self.comment + "_hzn",
+        })
+        ok = r is not None and r.retcode == self.mt5.TRADE_RETCODE_DONE
+        if not ok:
+            print(f"  [mt5] close_position FAILED pos={position_id} retcode={getattr(r,'retcode',None)}")
+        return ok
+
+    @_synced
+    def copy_m15(self, symbol: str, count: int):
+        """Last `count` CLOSED M15 bars as a DataFrame (time, open, high, low, close) for
+        the SMC engine. Drops the still-forming current bar (index -1) so detection only
+        ever runs on closed bars (anti-lookahead). None on any query failure."""
+        import pandas as pd
+        mt5 = self.mt5
+        if not mt5.symbol_select(symbol, True):
+            return None
+        rates = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, int(count) + 1)
+        if rates is None or len(rates) < 2:
+            return None
+        df = pd.DataFrame(rates)
+        df["time"] = pd.to_datetime(df["time"], unit="s")     # broker server time
+        df = df[["time", "open", "high", "low", "close"]].iloc[:-1].reset_index(drop=True)
+        return df
 
     @_synced
     def fill_info(self, order_ticket: int):
@@ -417,16 +499,16 @@ class Mt5Broker:
 class DryRunBroker(Mt5Broker):
     """Real prices, NO order placement. Synthetic tickets so the loop can track."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, magic: int = MAGIC, comment: str = COMMENT):
+        super().__init__(magic=magic, comment=comment)
         self._fake = 9_000_000
         self._dry_open: set[int] = set()      # in-memory; never persisted → can't poison live
 
-    def place_limit(self, symbol: str, o: Order) -> int | None:
+    def place_limit(self, symbol: str, o: Order, comment: str | None = None) -> int | None:
         self._fake += 1
         self._dry_open.add(self._fake)
         print(f"  [DRY] would place {o.order_type} {symbol} {o.volume} @ {o.entry} "
-              f"sl={o.sl} tp={o.tp} (TP1 {o.tp1_pip:g}pip) ticket~{self._fake}")
+              f"sl={o.sl} tp={o.tp} ({comment or ''}) ticket~{self._fake}")
         return self._fake
 
     def place_market(self, symbol: str, o: Order) -> dict | None:
@@ -452,6 +534,11 @@ class DryRunBroker(Mt5Broker):
 
     def modify_sl(self, position_id: int, new_sl: float) -> bool:
         print(f"  [DRY] would move SL of pos {position_id} -> {new_sl}")
+        return True
+
+    def close_position(self, position_id: int) -> bool:
+        self._dry_open.discard(position_id)
+        print(f"  [DRY] would close pos {position_id} (horizon)")
         return True
 
     def fill_info(self, order_ticket: int) -> dict | None:

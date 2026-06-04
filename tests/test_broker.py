@@ -249,3 +249,33 @@ def test_open_exposure_counts_and_failclosed():
     assert b.open_exposure("XAUUSDm") == 2        # 1 pending + 1 position
     f.orders_get_none = True
     assert b.open_exposure("XAUUSDm") is None     # query failed → None (don't place)
+
+
+# ---- cancel safety (magic verify + fail-closed on query failure / fill race) ----
+def test_cancel_removes_own_magic_order():
+    b, f = make_broker()
+    tk = b.place_limit("XAUUSDm", _lim())
+    assert b.cancel(tk) is True
+    assert all(o.ticket != tk for o in f._orders)
+
+
+def test_cancel_failclosed_when_orders_query_fails():
+    b, f = make_broker()
+    tk = b.place_limit("XAUUSDm", _lim())
+    f.orders_get_none = True
+    assert b.cancel(tk) is False                  # query failed → never blind-remove
+
+
+def test_cancel_defers_when_order_already_gone():
+    # ticket not resting (filled or vanished) → False so _manage_open re-resolves via fill_info
+    b, f = make_broker()
+    assert b.cancel(987654) is False
+
+
+def test_cancel_refuses_foreign_magic():
+    from types import SimpleNamespace
+    b, f = make_broker()
+    f._orders.append(SimpleNamespace(ticket=5555, magic=4242, type=ORDER_TYPE_BUY_LIMIT,
+                                     price_open=4460.0, sl=4450.0, tp=4465.0, volume_current=0.01))
+    assert b.cancel(5555) is False                # not ours
+    assert any(o.ticket == 5555 for o in f._orders)   # untouched

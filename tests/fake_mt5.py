@@ -29,6 +29,9 @@ TRADE_RETCODE_DONE = 10009
 TRADE_RETCODE_PLACED = 10008
 ACCOUNT_TRADE_MODE_DEMO = 0
 ACCOUNT_TRADE_MODE_REAL = 2
+ACCOUNT_MARGIN_MODE_RETAIL_NETTING = 0
+ACCOUNT_MARGIN_MODE_EXCHANGE = 1
+ACCOUNT_MARGIN_MODE_RETAIL_HEDGING = 2
 POSITION_TYPE_BUY = 0
 POSITION_TYPE_SELL = 1
 DEAL_ENTRY_IN = 0
@@ -38,9 +41,10 @@ DEAL_ENTRY_OUT = 1
 class FakeMt5:
     def __init__(self, login=433674415, trade_mode=ACCOUNT_TRADE_MODE_DEMO,
                  server="Exness-MT5Trial7", bid=4460.0, ask=4460.3,
-                 point=0.001, stops_level=0):
+                 point=0.001, stops_level=0,
+                 margin_mode=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING):
         self.acc = SimpleNamespace(login=login, trade_mode=trade_mode, server=server,
-                                   balance=10000.0)
+                                   balance=10000.0, margin_mode=margin_mode)
         self.acc_none = False              # set True to simulate transient account_info None
         self.bid, self.ask = bid, ask
         self.point, self.stops_level = point, stops_level
@@ -71,6 +75,9 @@ class FakeMt5:
     TRADE_RETCODE_PLACED = TRADE_RETCODE_PLACED
     ACCOUNT_TRADE_MODE_DEMO = ACCOUNT_TRADE_MODE_DEMO
     ACCOUNT_TRADE_MODE_REAL = ACCOUNT_TRADE_MODE_REAL
+    ACCOUNT_MARGIN_MODE_RETAIL_NETTING = ACCOUNT_MARGIN_MODE_RETAIL_NETTING
+    ACCOUNT_MARGIN_MODE_EXCHANGE = ACCOUNT_MARGIN_MODE_EXCHANGE
+    ACCOUNT_MARGIN_MODE_RETAIL_HEDGING = ACCOUNT_MARGIN_MODE_RETAIL_HEDGING
     POSITION_TYPE_BUY = POSITION_TYPE_BUY
     POSITION_TYPE_SELL = POSITION_TYPE_SELL
     DEAL_ENTRY_IN = DEAL_ENTRY_IN
@@ -89,8 +96,12 @@ class FakeMt5:
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(bid=self.bid, ask=self.ask)
 
-    def orders_get(self, symbol=None):
-        return None if self.orders_get_none else list(self._orders)
+    def orders_get(self, symbol=None, ticket=None):
+        if self.orders_get_none:
+            return None
+        if ticket is not None:                         # real MT5 supports ticket lookup
+            return [o for o in self._orders if o.ticket == ticket]
+        return list(self._orders)
 
     def positions_get(self, symbol=None, ticket=None):
         if self.positions_get_none:
