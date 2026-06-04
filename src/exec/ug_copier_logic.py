@@ -8,9 +8,9 @@ order is ever placed.
 UG signal geometry (decoded — see docs/decisions/ug_logic_decode.md):
   - Entry is a ZONE "A - B"; SL is a fixed price; TP1..TP4 in pip (1 pip = 0.1 px).
   - Entry within the zone is chosen PER METHOD (ENTRY_MODE_BY_TP1) — all MID for now.
-  - TP1 = 50 pip (PP2 scalp), entry MID, is the ONLY proven edge. TP1 ∈ {100, 150}
-    are kept ON DEMO purely for OBSERVATION (gather comparison data) — NOT promoted
-    to real money until they show an edge. See ENTRY_MODE_BY_TP1 below.
+  - TP1 ∈ {50, 100, 150} all trade on real money, entry MID, with a PER-METHOD 2-leg exit
+    (near + runner, SL→BE). Near/runner distances are per method (TP1_PIP_BY_METHOD,
+    RUNNER_PIP_BY_TP1 below), backtest-tuned per method. OBSERVE_ONLY_TP1 is empty.
   - Placement is a pull-back LIMIT: place when price is on the fillable side of entry
     and WAIT for the pull-back. With DEEP_LIMIT=True we place even if price already
     passed TP1 (it's a limit, not a chase); DEEP_LIMIT=False restores the old
@@ -22,34 +22,34 @@ import math
 from dataclasses import dataclass
 
 PIP = 0.1                       # XAU: 1 pip = 0.1 price
-# Entry edge per method, from a full-history backtest of every collected UG signal
-# on real M1 (scripts/ug_method_pnl.py, 93 signals, 26/5–1/6, limit fill + 3pip
-# cost, 0.01 lot):
-#   TP1=50  (PP2 scalp), MID : +$30.90, WR 78%, +0.116R — the ONLY proven edge.
-#   TP1=100                  : every entry mode net-negative (n=6, thin).
-#   TP1=150 (PRI-GOLD)       : when filled, WR ~40% → net-negative (n=16). 'deep'
-#                              never fills (no data), so we observe it at MID.
-# DECISION (user): trade 50-mid for real; keep 100 & 150 ON DEMO at MID purely to
-# OBSERVE / accumulate comparison data via /stats by_method. They are NOT edges yet
-# — do NOT enable them for real money until the demo data says otherwise. Entry held
-# at MID across all three so the only variable compared is TP1 size.
+# All methods (50/100/150) trade on real money at MID entry with the per-method 2-leg exit
+# (TP1_PIP_BY_METHOD near leg + RUNNER_PIP_BY_TP1 runner, SL→BE after the near leg books).
+# Distances are backtested per method (scripts/tcu_edge, scripts/tcu_legs): the 50-method
+# books quick (near 50pip, tight SL); the 150-method runs far (near 100pip, runner 200pip);
+# the 100-method has no live history → safe defaults (near 50, runner 150). Entry held at
+# MID for all. OBSERVE_ONLY_TP1 is empty (no method is demo-only anymore).
 # near=entry_low (entry-side); deep=entry_high (SL-side); mid=midpoint.
 ENTRY_MODE_BY_TP1 = {50.0: "mid", 100.0: "mid", 150.0: "mid"}
 OBSERVE_ONLY_TP1 = ()                   # (was 100/150) — now ALL methods use the same exit
 # UNIFIED EXIT (user decision, applies to demo AND real): every UG signal — regardless of
-# its published TP template — is traded as the proven scalp bracket: TP1 leg at a FIXED
-# 50 pip + runner leg at a FIXED 150 pip, SL→BE after TP1. Data: the 50pip-TP1 wins ~88%
-# across ALL method entries (73 fills pooled); 100/150's far native TPs were the loser, so
-# we cap them to the well-sampled scalp distances. tp1_pip still carries the signal's
-# method (50/100/150) for /stats labelling + dedup, but the TP PRICES are fixed.
+# its published TP template — is traded as a 2-leg bracket (near TP leg + runner leg,
+# SL→BE after the near leg books). Both leg distances are PER METHOD (TP1_PIP_BY_METHOD,
+# RUNNER_PIP_BY_TP1): the tight-SL 50-method books quick (near 50pip); the wide-SL 150-method
+# books the near leg at 100pip (it runs far). tp1_pip carries the signal's method (50/100/150)
+# for /stats labelling + dedup; the FIXED_* values below are only the fallback defaults.
 FIXED_TP1_PIP = 50.0
 FIXED_TP3_PIP = 150.0
-# Runner (tp3) distance PER METHOD (TP1 stays a fixed 50pip on the high-WR scalp leg).
-# Backtest (scripts/tcu_edge, recency-weighted): the 150-method (Ai Signals) RUNS far —
-# median MFE ~200pip, ~50% reach +200 — so its runner at 200pip earns ~40% more per signal
-# than at 150 with the SAME ~85% WR (TP1@50 still anchors the win-rate). The 50pip scalp
-# doesn't run as far → keeps the proven 150 runner. (50/100 to be re-checked separately.)
+# Runner (tp3) distance PER METHOD. Backtest (scripts/tcu_edge, recency-weighted): the
+# 150-method (Ai Signals) RUNS far (median MFE ~200pip, ~50% reach +200) → runner 200pip;
+# the 50-method doesn't run as far → keeps the 150 runner.
 RUNNER_PIP_BY_TP1 = {50.0: 150.0, 100.0: 150.0, 150.0: 200.0}
+# TP1 (near leg) distance PER METHOD. The 150-method has a WIDE ~150pip SL (it targets far),
+# so booking the near leg at only 50pip wastes it AND leaves a 0.33 TP1:SL ratio. Backtest
+# (scripts/tcu_edge, ALL windows full/28d/15d) shows the 150-method's near leg at 100pip
+# earns +35-89% per signal vs 50pip (WR 85%->~74%, but profit ~doubles on recent; TP1:SL
+# improves to 0.67). The 50-method has a tighter ~115pip SL — booking QUICK at 50 is optimal
+# (raising it LOSES on every window). 100-method has no live history → keep 50 (conservative).
+TP1_PIP_BY_METHOD = {50.0: 50.0, 100.0: 50.0, 150.0: 100.0}
 ALLOWED_TP1_PIP = tuple(ENTRY_MODE_BY_TP1)
 
 # EXIT strategy (scripts/ug_exit_strategy.py, Codex-reviewed): instead of taking the
@@ -112,9 +112,9 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
            real_mode: bool = False) -> Decision:
     """Decide what to do with a parsed UG signal at the current market price.
 
-    real_mode=True (trading real money) restricts to the proven edge only: the
-    observation-only methods (OBSERVE_ONLY_TP1) are skipped so demo-only data
-    gathering never risks real funds."""
+    real_mode=True (trading real money) skips any method still listed in OBSERVE_ONLY_TP1
+    (currently EMPTY — all of 50/100/150 trade real with the per-method 2-leg exit). The
+    hook is kept so a method can be demoted to demo-only again without code changes."""
     if not isinstance(sig, dict):
         return Decision("skip", f"bad signal {sig!r}")
     direction = sig.get("direction")
@@ -152,9 +152,11 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     long = direction == "long"
     sign = 1.0 if long else -1.0
     zlo, zhi = (lo, hi) if lo <= hi else (hi, lo)
-    # UNIFIED exit: TP1 is ALWAYS 50 pip from the anchor (not the signal's published TP1).
-    # tp1_pip is kept above purely as the method identity (50/100/150) for /stats + dedup.
-    tp1_price = mid + sign * FIXED_TP1_PIP * PIP
+    # Near-leg TP distance is PER METHOD (TP1_PIP_BY_METHOD): 50pip for the tight-SL 50/100
+    # methods, 100pip for the wide-SL (~150pip) 150-method which runs far. tp1_pip stays the
+    # method identity (50/100/150) for /stats + dedup; tp1_leg_pip is the actual TP distance.
+    tp1_leg_pip = TP1_PIP_BY_METHOD.get(tp1_pip, FIXED_TP1_PIP)
+    tp1_price = mid + sign * tp1_leg_pip * PIP
 
     # SL must sit on the correct (loss) side, TP1 on the profit side, of the anchor.
     if (long and not (sl < mid < tp1_price)) or (not long and not (sl > mid > tp1_price)):
@@ -199,7 +201,7 @@ def decide(sig: dict, current_price: float, volume: float = 0.01,
     anchor_r = round(mid, 3)
     legs = [Order(side=direction, order_type=otype, entry=entry_r, sl=sl_r,
                   tp=round(tp1_price, 3), volume=volume, tp1_pip=tp1_pip, leg="tp1",
-                  tp_pip=FIXED_TP1_PIP, anchor=anchor_r)]
+                  tp_pip=tp1_leg_pip, anchor=anchor_r)]
 
     # Runner leg: TP distance is per-method (RUNNER_PIP_BY_TP1) — 150-method runs farther so
     # its runner is 200pip; others keep 150pip. SL→BE after the TP1 leg books (managed live).

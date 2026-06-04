@@ -6,9 +6,10 @@ price is at/better than the anchor (mid), else a LIMIT at the anchor waiting for
 pull-back; skip if price is past the zone the wrong way]. Auto-detects demo vs real and
 keeps a separate ledger/state/telegram per account.
 
-EXIT — UNIFIED bracket for ALL methods: two equal legs at the same entry+SL —
-  leg 'tp1' : FIXED 50 pip   (the proven high-WR scalp; ~88% across all method entries)
-  leg 'tp3' : FIXED 150 pip  (runner; its SL → break-even once the tp1 leg wins)
+EXIT — 2-leg bracket for ALL methods: two equal legs at the same entry+SL, PER-METHOD
+distances (TP1_PIP_BY_METHOD / RUNNER_PIP_BY_TP1 in ug_copier_logic):
+  leg 'tp1' (near) : 50pip for the tight-SL 50/100 methods, 100pip for the wide-SL 150-method
+  leg 'tp3' (runner): 150pip (50/100) or 200pip (150-method); its SL → break-even once tp1 wins
 The signal's published far TPs (100/150/300...) are NOT used as targets; tp1_pip only
 identifies the method (50/100/150) for /stats + dedup. Stale-guard, daily-loss
 circuit-breaker, heartbeat + external watchdog, orphan recovery on restart.
@@ -571,7 +572,7 @@ def main() -> int:
     if acc:
         print(f"  account {acc.login} · {acc.server} · {ACCOUNT_LABEL} · balance {acc.balance}")
     if args.live and not is_demo:
-        print("  !! REAL-MONEY order placement ENABLED · all UG methods, unified 50/150 exit !!")
+        print("  !! REAL-MONEY order placement ENABLED · all UG methods, per-method 2-leg exit !!")
     elif args.live:
         print("  !! LIVE order placement ENABLED (demo — all methods) !!")
 
@@ -581,7 +582,7 @@ def main() -> int:
     _adopt_orphans(broker, args.symbol)        # recover any untracked magic orders/positions
     # copier's own command bot (separate token) → /stats /open /last /flat /pause
     threading.Thread(target=_command_loop, args=(broker, args.symbol), daemon=True).start()
-    _filter = "50/100/150 (TP1@50 + runner: 150-method→200pip, 50/100→150pip, SL→BE)"
+    _filter = "50/100/150 (near TP: 150→100pip, 50/100→50pip · runner: 150→200pip, 50/100→150pip · SL→BE)"
     notify.send(f"📥 <b>UG Copier khởi động — [{ACCOUNT_LABEL}]</b> · {mode} · {args.symbol} · "
                 f"vol {args.volume} · lọc TP1∈{{{_filter}}} · ledger {trade_db.DB_PATH.name}\n"
                 f"Lệnh: /stats /open /last /flat /pause /resume")

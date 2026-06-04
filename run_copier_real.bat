@@ -6,7 +6,7 @@ REM data\ug\live_signals.jsonl.
 REM  ! run_copier_real_inner.bat ALREADY passes --live --allow-real -- this is NOT a dry
 REM  run. It places REAL orders as soon as the MT5 terminal is logged into a REAL
 REM  account. The copier auto-detects demo vs real: on a DEMO login it trades demo, on a
-REM  REAL login it trades real money (unified 50/150 exit). Confirm MT5 is logged into
+REM  REAL login it trades real money (per-method 2-leg exit). Confirm MT5 is logged into
 REM  the INTENDED account before launching.
 setlocal
 set "BOTDIR=C:\mt5-bot"

@@ -28,8 +28,8 @@ def test_buy_at_or_below_mid_enters_market():
     o = d.order
     assert o.order_type == "buy_market"
     assert o.entry == 4460                                # market = current (good) price
-    assert o.tp == round(4463 + 50 * 0.1, 3)             # 4468 — UNIFIED TP1 = 50pip (not 150)
-    assert o.tp_pip == 50 and o.tp1_pip == 150           # actual TP 50pip; method id still 150
+    assert o.tp == round(4463 + 100 * 0.1, 3)            # 4473 — 150-method near leg = 100pip
+    assert o.tp_pip == 100 and o.tp1_pip == 150          # actual TP 100pip; method id still 150
     assert o.sl == 4448 and o.volume == 0.01
 
 
@@ -96,8 +96,8 @@ def test_chase_mode_limit_and_skips(monkeypatch):
     # between mid(4463) and TP1(4468=mid+50pip) → legacy limit at mid
     d = L.decide(_buy(tp1=150), current_price=4465)
     assert d.action == "place" and d.order.order_type == "buy_limit" and d.order.entry == 4463
-    # past TP1 (>4468) → skip; in-zone-below-mid → skip (legacy never enters market)
-    assert L.decide(_buy(tp1=150), 4470).action == "skip"
+    # past TP1 (150-method near leg now 100pip → TP1=4473) → skip; in-zone-below-mid → skip
+    assert L.decide(_buy(tp1=150), 4475).action == "skip"
     assert L.decide(_buy(tp1=150), 4460).action == "skip"
 
 
@@ -134,13 +134,22 @@ def test_runner_always_added_fixed_150_even_without_published_tp3():
 
 
 def test_runner_200pip_for_150_method():
-    # 150-method (Ai Signals) runs far → its runner TP is 200pip (not 150). TP1 stays 50pip.
+    # 150-method (Ai Signals) runs far → near leg books at 100pip, runner TP at 200pip.
     d = decide(_buy(tp1=150), current_price=4460)        # mid 4463, market entry 4460
     assert len(d.orders) == 2
     a, b = d.orders
-    assert a.leg == "tp1" and a.tp == round(4463 + 50 * 0.1, 3) and a.tp_pip == 50
+    assert a.leg == "tp1" and a.tp == round(4463 + 100 * 0.1, 3) and a.tp_pip == 100  # near 100pip
     assert b.leg == "tp3" and b.tp == round(4463 + 200 * 0.1, 3)   # 4483 — runner 200pip
     assert b.tp_pip == 200 and b.tp1_pip == 150                     # distance 200; method id 150
+
+
+def test_tp1_distance_per_method():
+    # Near-leg TP is per-method: 50-method books quick at 50pip (tight SL); 150-method at
+    # 100pip (wide ~150pip SL, runs far). tp1_pip stays the method identity.
+    d50 = decide(_buy(tp1=50), current_price=4460)
+    assert d50.order.tp == round(4463 + 50 * 0.1, 3) and d50.order.tp_pip == 50 and d50.order.tp1_pip == 50
+    d150 = decide(_buy(tp1=150), current_price=4460)
+    assert d150.order.tp == round(4463 + 100 * 0.1, 3) and d150.order.tp_pip == 100
 
 
 def test_runner_stays_150_for_50_and_100():
